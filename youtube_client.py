@@ -39,12 +39,20 @@ def analytics_service():
     return build("youtubeAnalytics", "v2", credentials=_credentials(), cache_discovery=False)
 
 
-def fetch_channel_stats(channel_id: str) -> dict:
+def fetch_channel_stats(channel_id: str | None = None) -> dict:
+    """Fetch channel stats. If channel_id is None, uses the authenticated user's own channel."""
     yt = data_service()
-    resp = yt.channels().list(part="snippet,statistics,contentDetails", id=channel_id).execute()
-    item = resp["items"][0]
+    if channel_id:
+        resp = yt.channels().list(part="snippet,statistics,contentDetails", id=channel_id).execute()
+    else:
+        resp = yt.channels().list(part="snippet,statistics,contentDetails", mine=True).execute()
+    items = resp.get("items", [])
+    if not items:
+        raise ValueError(f"No channel returned. Response: {resp}")
+    item = items[0]
     return {
-        "channel_id": channel_id,
+        "channel_id": item["id"],
+        "channel_title": item["snippet"]["title"],
         "subscriber_count": int(item["statistics"].get("subscriberCount", 0)),
         "view_count": int(item["statistics"].get("viewCount", 0)),
         "video_count": int(item["statistics"].get("videoCount", 0)),

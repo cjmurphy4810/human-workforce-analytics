@@ -6,5 +6,6 @@ venv/
 .streamlit/secrets.toml
 client_secret*.json
 token.json
+.oauth_credentials.json
 *.log
 .DS_Store

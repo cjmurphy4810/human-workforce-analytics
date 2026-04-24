@@ -3,11 +3,13 @@
 Usage:
     python scripts/get_refresh_token.py /path/to/client_secret.json
 
-Opens a browser, prompts you to log in to chrisjmurphyauthor@gmail.com,
-and prints the refresh token. Save the printed values into your secrets.
+Opens a browser, prompts you to log in, and writes credentials to
+.oauth_credentials.json (gitignored) for reliable extraction.
 """
 
+import json
 import sys
+from pathlib import Path
 
 from google_auth_oauthlib.flow import InstalledAppFlow
 
@@ -15,6 +17,8 @@ SCOPES = [
     "https://www.googleapis.com/auth/youtube.readonly",
     "https://www.googleapis.com/auth/yt-analytics.readonly",
 ]
+
+OUT = Path(__file__).resolve().parent.parent / ".oauth_credentials.json"
 
 
 def main(client_secret_path: str) -> None:
@@ -24,11 +28,15 @@ def main(client_secret_path: str) -> None:
         access_type="offline",
         prompt="consent",
     )
-    print("\n=== COPY THESE INTO YOUR SECRETS ===")
-    print(f"YT_CLIENT_ID = {flow.client_config['client_id']}")
-    print(f"YT_CLIENT_SECRET = {flow.client_config['client_secret']}")
-    print(f"YT_REFRESH_TOKEN = {creds.refresh_token}")
-    print("====================================\n")
+    payload = {
+        "client_id": flow.client_config["client_id"],
+        "client_secret": flow.client_config["client_secret"],
+        "refresh_token": creds.refresh_token,
+    }
+    OUT.write_text(json.dumps(payload, indent=2))
+    print(f"\nWrote credentials to {OUT}")
+    print("Now run:")
+    print(f"  python -c \"import json; print(json.load(open('{OUT}'))['refresh_token'])\" | gh secret set YT_REFRESH_TOKEN --repo cjmurphy4810/human-workforce-analytics")
 
 
 if __name__ == "__main__":

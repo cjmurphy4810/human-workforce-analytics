@@ -22,11 +22,13 @@ from youtube_client import (
 
 def main() -> None:
     init_db()
-    channel_id = os.environ["YT_CHANNEL_ID"]
+    requested_channel_id = os.environ.get("YT_CHANNEL_ID") or None
     captured_at = datetime.now(timezone.utc).isoformat()
 
-    print(f"[{captured_at}] Fetching channel stats for {channel_id}...")
-    channel = fetch_channel_stats(channel_id)
+    print(f"[{captured_at}] Fetching channel stats...")
+    channel = fetch_channel_stats(requested_channel_id)
+    channel_id = channel["channel_id"]
+    print(f"Channel: {channel['channel_title']} ({channel_id})")
 
     print("Fetching all video IDs from uploads playlist...")
     video_ids = fetch_all_video_ids(channel["uploads_playlist_id"])
