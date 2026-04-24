@@ -140,7 +140,8 @@ def fetch_daily_channel_metrics(start: date, end: date, channel_id: str | None =
     ]
 
 
-def fetch_daily_video_metrics(start: date, end: date, channel_id: str | None = None) -> list[dict]:
+def fetch_video_period_metrics(start: date, end: date, channel_id: str | None = None) -> list[dict]:
+    """Aggregate metrics per video for the date range (not per day)."""
     yt = analytics_service()
     ids = f"channel=={channel_id}" if channel_id else "channel==MINE"
     resp = yt.reports().query(
@@ -148,20 +149,20 @@ def fetch_daily_video_metrics(start: date, end: date, channel_id: str | None = N
         startDate=start.isoformat(),
         endDate=end.isoformat(),
         metrics="views,estimatedMinutesWatched,averageViewDuration,likes,subscribersGained",
-        dimensions="day,video",
+        dimensions="video",
         maxResults=200,
         sort="-views",
     ).execute()
     rows = resp.get("rows", [])
     return [
         {
-            "metric_date": r[0],
-            "video_id": r[1],
-            "views": int(r[2]),
-            "estimated_minutes_watched": float(r[3]),
-            "average_view_duration": float(r[4]),
-            "likes": int(r[5]),
-            "subscribers_gained": int(r[6]),
+            "metric_date": end.isoformat(),
+            "video_id": r[0],
+            "views": int(r[1]),
+            "estimated_minutes_watched": float(r[2]),
+            "average_view_duration": float(r[3]),
+            "likes": int(r[4]),
+            "subscribers_gained": int(r[5]),
         }
         for r in rows
     ]

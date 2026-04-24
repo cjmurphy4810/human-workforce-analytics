@@ -14,8 +14,8 @@ from youtube_client import (
     fetch_all_video_ids,
     fetch_channel_stats,
     fetch_daily_channel_metrics,
-    fetch_daily_video_metrics,
     fetch_video_details,
+    fetch_video_period_metrics,
     parse_iso8601_duration,
     resolve_channel_id,
 )
@@ -46,8 +46,8 @@ def main() -> None:
     print(f"Fetching daily channel metrics {start} -> {end}...")
     daily_channel = fetch_daily_channel_metrics(start, end, channel_id)
 
-    print(f"Fetching daily per-video metrics {start} -> {end}...")
-    daily_video = fetch_daily_video_metrics(start, end, channel_id)
+    print(f"Fetching per-video totals {start} -> {end}...")
+    daily_video = fetch_video_period_metrics(start, end, channel_id)
 
     with get_conn() as conn:
         conn.execute(
