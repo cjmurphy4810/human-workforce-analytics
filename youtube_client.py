@@ -39,6 +39,24 @@ def analytics_service():
     return build("youtubeAnalytics", "v2", credentials=_credentials(), cache_discovery=False)
 
 
+def resolve_channel_id(channel_id_or_handle: str | None) -> str | None:
+    """Accept a channel ID (UC...), a handle (@TheHumanWorkforce), or None."""
+    if not channel_id_or_handle:
+        return None
+    val = channel_id_or_handle.strip()
+    if val.startswith("UC") and len(val) == 24:
+        return val
+    if val.startswith("@") or not val.startswith("UC"):
+        handle = val if val.startswith("@") else f"@{val}"
+        yt = data_service()
+        resp = yt.channels().list(part="id", forHandle=handle).execute()
+        items = resp.get("items", [])
+        if not items:
+            raise ValueError(f"No channel found for handle {handle}")
+        return items[0]["id"]
+    return val
+
+
 def fetch_channel_stats(channel_id: str | None = None) -> dict:
     """Fetch channel stats. If channel_id is None, uses the authenticated user's own channel."""
     yt = data_service()
@@ -99,10 +117,11 @@ def fetch_video_details(video_ids: list[str]) -> list[dict]:
     return details
 
 
-def fetch_daily_channel_metrics(start: date, end: date) -> list[dict]:
+def fetch_daily_channel_metrics(start: date, end: date, channel_id: str | None = None) -> list[dict]:
     yt = analytics_service()
+    ids = f"channel=={channel_id}" if channel_id else "channel==MINE"
     resp = yt.reports().query(
-        ids="channel==MINE",
+        ids=ids,
         startDate=start.isoformat(),
         endDate=end.isoformat(),
         metrics="views,estimatedMinutesWatched,subscribersGained,subscribersLost",
@@ -121,10 +140,11 @@ def fetch_daily_channel_metrics(start: date, end: date) -> list[dict]:
     ]
 
 
-def fetch_daily_video_metrics(start: date, end: date) -> list[dict]:
+def fetch_daily_video_metrics(start: date, end: date, channel_id: str | None = None) -> list[dict]:
     yt = analytics_service()
+    ids = f"channel=={channel_id}" if channel_id else "channel==MINE"
     resp = yt.reports().query(
-        ids="channel==MINE",
+        ids=ids,
         startDate=start.isoformat(),
         endDate=end.isoformat(),
         metrics="views,estimatedMinutesWatched,averageViewDuration,likes,subscribersGained",

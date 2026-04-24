@@ -17,15 +17,19 @@ from youtube_client import (
     fetch_daily_video_metrics,
     fetch_video_details,
     parse_iso8601_duration,
+    resolve_channel_id,
 )
 
 
 def main() -> None:
     init_db()
-    requested_channel_id = os.environ.get("YT_CHANNEL_ID") or None
+    requested = os.environ.get("YT_CHANNEL_ID") or None
     captured_at = datetime.now(timezone.utc).isoformat()
 
-    print(f"[{captured_at}] Fetching channel stats...")
+    print(f"[{captured_at}] Resolving channel...")
+    requested_channel_id = resolve_channel_id(requested)
+
+    print("Fetching channel stats...")
     channel = fetch_channel_stats(requested_channel_id)
     channel_id = channel["channel_id"]
     print(f"Channel: {channel['channel_title']} ({channel_id})")
@@ -40,10 +44,10 @@ def main() -> None:
     end = date.today()
     start = end - timedelta(days=7)
     print(f"Fetching daily channel metrics {start} -> {end}...")
-    daily_channel = fetch_daily_channel_metrics(start, end)
+    daily_channel = fetch_daily_channel_metrics(start, end, channel_id)
 
     print(f"Fetching daily per-video metrics {start} -> {end}...")
-    daily_video = fetch_daily_video_metrics(start, end)
+    daily_video = fetch_daily_video_metrics(start, end, channel_id)
 
     with get_conn() as conn:
         conn.execute(
