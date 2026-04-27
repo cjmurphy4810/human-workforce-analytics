@@ -137,7 +137,7 @@ if not daily_channel.empty:
                     name="Cumulative hours", mode="lines+markers",
                     yaxis="y2", line=dict(color="#F58518", width=3))
     fig.update_layout(
-        title="Daily and Cumulative Watch Time (last 7 days)",
+        title="Daily and Cumulative Watch Time (last 30 days)",
         xaxis_title="Date",
         yaxis=dict(title="Hours watched per day"),
         yaxis2=dict(title="Cumulative hours", overlaying="y", side="right"),
@@ -161,5 +161,5 @@ if not videos.empty:
         per_day = daily_videos[daily_videos["video_id"] == selected].copy()
         if not per_day.empty:
             per_day["metric_date"] = pd.to_datetime(per_day["metric_date"])
-            fig = px.bar(per_day, x="metric_date", y="views", title="Daily views (last 7 days)")
+            fig = px.bar(per_day, x="metric_date", y="views", title="Daily views (last 30 days)")
             st.plotly_chart(fig, use_container_width=True)
