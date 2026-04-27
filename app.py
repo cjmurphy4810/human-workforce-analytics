@@ -95,7 +95,7 @@ with t2:
 
 
 if not daily_channel.empty:
-    st.subheader("Daily Performance (Last 7 Days)")
+    st.subheader("Daily Performance (Last 30 Days)")
     daily_channel["metric_date"] = pd.to_datetime(daily_channel["metric_date"])
     daily_channel["net_subs"] = daily_channel["subscribers_gained"] - daily_channel["subscribers_lost"]
 
