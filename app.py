@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 DB_PATH = Path(__file__).parent / "data.db"
@@ -121,6 +122,28 @@ if not video_snapshots.empty:
         use_container_width=True,
         hide_index=True,
     )
+
+
+if not daily_channel.empty:
+    st.subheader("Watch Time")
+    hours = daily_channel.copy()
+    hours["hours_watched"] = hours["estimated_minutes_watched"] / 60
+    hours["cumulative_hours"] = hours["hours_watched"].cumsum()
+
+    fig = go.Figure()
+    fig.add_bar(x=hours["metric_date"], y=hours["hours_watched"],
+                name="Hours watched (per day)", marker_color="#4C78A8")
+    fig.add_scatter(x=hours["metric_date"], y=hours["cumulative_hours"],
+                    name="Cumulative hours", mode="lines+markers",
+                    yaxis="y2", line=dict(color="#F58518", width=3))
+    fig.update_layout(
+        title="Daily and Cumulative Watch Time (last 7 days)",
+        xaxis_title="Date",
+        yaxis=dict(title="Hours watched per day"),
+        yaxis2=dict(title="Cumulative hours", overlaying="y", side="right"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
 
 if not videos.empty:
