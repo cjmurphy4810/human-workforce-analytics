@@ -42,7 +42,7 @@ def main() -> None:
     videos = fetch_video_details(video_ids)
 
     end = date.today()
-    start = end - timedelta(days=30)
+    start = end - timedelta(days=90)
     print(f"Fetching daily channel metrics {start} -> {end}...")
     daily_channel = fetch_daily_channel_metrics(start, end, channel_id)
 
