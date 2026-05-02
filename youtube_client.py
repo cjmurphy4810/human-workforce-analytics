@@ -168,6 +168,49 @@ def fetch_video_period_metrics(start: date, end: date, channel_id: str | None = 
     ]
 
 
+def fetch_retention_curve(video_id: str, start: date, end: date) -> dict | None:
+    """Fetch audienceWatchRatio at 25% and 75% elapsed time for one video.
+
+    Returns None if the API has no data for this (video, window) — typically
+    because the video has too few views to clear YouTube's privacy threshold.
+    """
+    yt = analytics_service()
+    resp = yt.reports().query(
+        ids="channel==MINE",
+        startDate=start.isoformat(),
+        endDate=end.isoformat(),
+        metrics="audienceWatchRatio",
+        dimensions="elapsedVideoTimeRatio",
+        filters=f"video=={video_id};audienceType==ORGANIC",
+    ).execute()
+    rows = resp.get("rows", [])
+    if not rows:
+        return None
+
+    points = sorted((float(r[0]), float(r[1])) for r in rows)
+
+    def at(target: float) -> float:
+        for i, (t, _) in enumerate(points):
+            if abs(t - target) < 1e-6:
+                return min(points[i][1], 1.0)
+            if t > target:
+                if i == 0:
+                    return min(points[0][1], 1.0)
+                t0, v0 = points[i - 1]
+                t1, v1 = points[i]
+                ratio = (target - t0) / (t1 - t0)
+                return min(v0 + ratio * (v1 - v0), 1.0)
+        return min(points[-1][1], 1.0)
+
+    return {
+        "video_id": video_id,
+        "window_start": start.isoformat(),
+        "window_end": end.isoformat(),
+        "retention_at_25": at(0.25),
+        "retention_at_75": at(0.75),
+    }
+
+
 def parse_iso8601_duration(duration: str) -> int:
     """Convert ISO 8601 duration (PT1H2M3S) to seconds."""
     m = re.match(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", duration)

@@ -53,10 +53,24 @@ CREATE TABLE IF NOT EXISTS daily_channel_metrics (
     subscribers_lost INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS retention_buckets (
+    video_id TEXT NOT NULL,
+    window_start TEXT NOT NULL,
+    window_end TEXT NOT NULL,
+    window_kind TEXT NOT NULL,
+    views INTEGER NOT NULL,
+    retention_at_25 REAL NOT NULL,
+    retention_at_75 REAL NOT NULL,
+    fetched_at TEXT NOT NULL,
+    PRIMARY KEY (video_id, window_start, window_end, window_kind)
+);
+
 CREATE INDEX IF NOT EXISTS idx_video_snapshots_video_time
     ON video_snapshots(video_id, captured_at);
 CREATE INDEX IF NOT EXISTS idx_channel_snapshots_time
     ON channel_snapshots(captured_at);
+CREATE INDEX IF NOT EXISTS idx_retention_buckets_kind_end
+    ON retention_buckets(window_kind, window_end);
 """
 
 
