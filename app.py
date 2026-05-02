@@ -1,6 +1,7 @@
 """Streamlit dashboard for Human Workforce podcast YouTube analytics."""
 
 import sqlite3
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -8,6 +9,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
+
+import retention
 
 DB_PATH = Path(__file__).parent / "data.db"
 
@@ -88,6 +91,10 @@ video_snapshots = load(
 daily_videos = load(
     "SELECT metric_date, video_id, views, estimated_minutes_watched, "
     "average_view_duration, likes FROM daily_video_metrics"
+)
+retention_buckets = load(
+    "SELECT video_id, window_start, window_end, window_kind, views, "
+    "retention_at_25, retention_at_75 FROM retention_buckets"
 )
 
 if channel_snapshots.empty:
@@ -222,6 +229,80 @@ if not daily_channel.empty:
     st.plotly_chart(fig, use_container_width=True)
 
 
+def render_retention(rb_full, daily_views, toggle, today, video_id=None):
+    """Render the retention summary line + KPI cards for either channel-wide or per-video."""
+    snap_start, snap_end, rolling_days = retention.window_bounds_for_toggle(toggle, today)
+    rolling_kind = f"rolling{rolling_days}"
+    rolling_start = today - timedelta(days=rolling_days)
+
+    rb = rb_full[rb_full["window_kind"] == rolling_kind].copy()
+    if video_id:
+        rb = rb[rb["video_id"] == video_id]
+    rb["window_start"] = pd.to_datetime(rb["window_start"]).dt.date
+    rb["window_end"] = pd.to_datetime(rb["window_end"]).dt.date
+    rb = rb[(rb["window_start"] == rolling_start) & (rb["window_end"] == today)]
+
+    if toggle == "Last month" and not rb.empty:
+        dv = daily_views.copy()
+        if video_id:
+            dv = dv[dv["video_id"] == video_id]
+        dv["metric_date"] = pd.to_datetime(dv["metric_date"]).dt.date
+        scoped = dv[(dv["metric_date"] >= snap_start) & (dv["metric_date"] <= snap_end)]
+        views_window = scoped.groupby("video_id")["views"].sum().to_dict()
+        rb["views"] = rb["video_id"].map(views_window).fillna(0).astype(int)
+
+    snap = retention.aggregate_snapshot(rb)
+
+    if snap["total_views"] == 0:
+        st.info("No retention data for this range yet.")
+        return
+
+    st.markdown(
+        f"<div style='font-size:1.05rem; margin:0.25rem 0 0.75rem;'>"
+        f"<span style='color:#E45756; font-weight:700;'>{snap['b1_pct']*100:.1f}%</span> "
+        f"dropped early &nbsp;·&nbsp; "
+        f"<span style='color:#F2B701; font-weight:700;'>{snap['b2_pct']*100:.1f}%</span> "
+        f"mid-watch &nbsp;·&nbsp; "
+        f"<span style='color:#54A24B; font-weight:700;'>{snap['b3_pct']*100:.1f}%</span> "
+        f"stuck around &nbsp;<span style='color:#888;'>({snap['total_views']:,} views)</span>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Dropped early (0–25%)",
+              f"{int(snap['b1_count']):,} views",
+              f"{snap['b1_pct'] * 100:.1f}%", delta_color="off")
+    c2.metric("Mid-watch (25–75%)",
+              f"{int(snap['b2_count']):,} views",
+              f"{snap['b2_pct'] * 100:.1f}%", delta_color="off")
+    c3.metric("Stuck around (75–100%)",
+              f"{int(snap['b3_count']):,} views",
+              f"{snap['b3_pct'] * 100:.1f}%", delta_color="off")
+
+
+# --- Audience retention ---
+
+if not retention_buckets.empty:
+    st.subheader("Audience Retention")
+    st.caption(
+        "Where viewers drop off as a share of each video's length, "
+        "aggregated across all videos."
+    )
+    toggle = st.radio(
+        "Range",
+        list(RANGES.keys()),
+        index=2,
+        horizontal=True,
+        key="retention_range",
+        label_visibility="collapsed",
+    )
+    render_retention(retention_buckets, daily_videos, toggle, date.today())
+else:
+    st.subheader("Audience Retention")
+    st.info("Retention data still loading. Run `python fetch_metrics.py` to populate.")
+
+
 # --- Per-video deep dive ---
 
 if not videos.empty:
@@ -243,3 +324,11 @@ if not videos.empty:
             fig = px.bar(per_day, x="metric_date", y="views",
                          title=f"Per-fetch view totals (since {per_day['metric_date'].min().date()})")
             st.plotly_chart(fig, use_container_width=True)
+
+        if not retention_buckets.empty:
+            st.markdown("**Retention buckets for this video**")
+            v_toggle = st.session_state.get("video_range", "Last quarter")
+            render_retention(
+                retention_buckets, daily_videos, v_toggle, date.today(),
+                video_id=selected,
+            )
