@@ -39,7 +39,8 @@ def test_write_retention_rolling_windows_writes_three_rows_per_video():
                     "retention_at_75": 0.4,
                 }
 
-            with patch("fetch_metrics.fetch_retention_curve", side_effect=fake_curve):
+            with patch("fetch_metrics.fetch_retention_curve", side_effect=fake_curve), \
+                 patch("fetch_metrics.fetch_video_views_in_window", return_value=42):
                 write_retention_rolling_windows(["v1", "v2"], today=date(2026, 5, 2))
 
             with sqlite3.connect(db_path) as conn:

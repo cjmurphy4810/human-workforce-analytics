@@ -211,6 +211,25 @@ def fetch_retention_curve(video_id: str, start: date, end: date) -> dict | None:
     }
 
 
+def fetch_video_views_in_window(video_id: str, start: date, end: date) -> int:
+    """Fetch the actual view count for one video over a date range.
+
+    Authoritative — comes straight from YouTube Analytics. Returns 0 if no data.
+    """
+    yt = analytics_service()
+    resp = yt.reports().query(
+        ids="channel==MINE",
+        startDate=start.isoformat(),
+        endDate=end.isoformat(),
+        metrics="views",
+        filters=f"video=={video_id}",
+    ).execute()
+    rows = resp.get("rows", [])
+    if not rows:
+        return 0
+    return int(rows[0][0])
+
+
 def parse_iso8601_duration(duration: str) -> int:
     """Convert ISO 8601 duration (PT1H2M3S) to seconds."""
     m = re.match(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", duration)

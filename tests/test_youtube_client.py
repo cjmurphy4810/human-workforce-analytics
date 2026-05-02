@@ -71,3 +71,29 @@ def test_fetch_retention_curve_returns_none_for_empty_response():
         )
 
     assert result is None
+
+
+def _fake_views_response(rows):
+    service = MagicMock()
+    service.reports().query().execute.return_value = {"rows": rows}
+    return service
+
+
+def test_fetch_video_views_in_window_returns_first_row_value():
+    """Single video query returns one row [views]; we return it as int."""
+    with patch("youtube_client.analytics_service") as mock_svc:
+        mock_svc.return_value = _fake_views_response([[1234]])
+        views = youtube_client.fetch_video_views_in_window(
+            video_id="v1", start=date(2026, 1, 1), end=date(2026, 1, 8)
+        )
+    assert views == 1234
+
+
+def test_fetch_video_views_in_window_returns_zero_when_empty():
+    """No rows = no recorded views in that window."""
+    with patch("youtube_client.analytics_service") as mock_svc:
+        mock_svc.return_value = _fake_views_response([])
+        views = youtube_client.fetch_video_views_in_window(
+            video_id="v1", start=date(2026, 1, 1), end=date(2026, 1, 8)
+        )
+    assert views == 0
