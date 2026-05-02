@@ -14,11 +14,52 @@ from youtube_client import (
     fetch_all_video_ids,
     fetch_channel_stats,
     fetch_daily_channel_metrics,
+    fetch_retention_curve,
     fetch_video_details,
     fetch_video_period_metrics,
     parse_iso8601_duration,
     resolve_channel_id,
 )
+
+
+ROLLING_WINDOWS = (
+    (7, "rolling7"),
+    (90, "rolling90"),
+    (365, "rolling365"),
+)
+
+
+def write_retention_rolling_windows(video_ids: list[str], today: date | None = None) -> None:
+    """Fetch retention curves for three rolling windows per video and persist them.
+
+    Views per row are summed from daily_video_metrics. Videos with no API data
+    (low view counts) are silently skipped.
+    """
+    today = today or date.today()
+    fetched_at = datetime.now(timezone.utc).isoformat()
+    with get_conn() as conn:
+        for vid in video_ids:
+            for days, kind in ROLLING_WINDOWS:
+                start = today - timedelta(days=days)
+                curve = fetch_retention_curve(vid, start, today)
+                if curve is None:
+                    continue
+                views = conn.execute(
+                    "SELECT COALESCE(SUM(views), 0) FROM daily_video_metrics "
+                    "WHERE video_id = ? AND metric_date BETWEEN ? AND ?",
+                    (vid, start.isoformat(), today.isoformat()),
+                ).fetchone()[0]
+                conn.execute(
+                    "INSERT INTO retention_buckets(video_id, window_start, window_end, "
+                    "window_kind, views, retention_at_25, retention_at_75, fetched_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(video_id, window_start, window_end, window_kind) DO UPDATE SET "
+                    "views=excluded.views, retention_at_25=excluded.retention_at_25, "
+                    "retention_at_75=excluded.retention_at_75, fetched_at=excluded.fetched_at",
+                    (vid, start.isoformat(), today.isoformat(), kind,
+                     int(views), curve["retention_at_25"], curve["retention_at_75"],
+                     fetched_at),
+                )
 
 
 def main() -> None:
@@ -96,6 +137,9 @@ def main() -> None:
                 (d["metric_date"], d["video_id"], d["views"], d["estimated_minutes_watched"],
                  d["average_view_duration"], d["likes"], d["subscribers_gained"]),
             )
+
+    print("Fetching retention curves for rolling windows (7/90/365 days)...")
+    write_retention_rolling_windows([v["video_id"] for v in videos])
 
     print("Done.")
 
