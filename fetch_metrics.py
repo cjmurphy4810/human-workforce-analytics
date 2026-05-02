@@ -17,6 +17,7 @@ from youtube_client import (
     fetch_retention_curve,
     fetch_video_details,
     fetch_video_period_metrics,
+    fetch_video_views_in_window,
     parse_iso8601_duration,
     resolve_channel_id,
 )
@@ -32,8 +33,9 @@ ROLLING_WINDOWS = (
 def write_retention_rolling_windows(video_ids: list[str], today: date | None = None) -> None:
     """Fetch retention curves for three rolling windows per video and persist them.
 
-    Views per row are summed from daily_video_metrics. Videos with no API data
-    (low view counts) are silently skipped.
+    Views are fetched directly from YouTube Analytics for each window — the
+    authoritative count, not derivable from daily_video_metrics (which stores
+    trailing-90-day snapshots, not actual daily views).
     """
     today = today or date.today()
     fetched_at = datetime.now(timezone.utc).isoformat()
@@ -44,11 +46,7 @@ def write_retention_rolling_windows(video_ids: list[str], today: date | None = N
                 curve = fetch_retention_curve(vid, start, today)
                 if curve is None:
                     continue
-                views = conn.execute(
-                    "SELECT COALESCE(SUM(views), 0) FROM daily_video_metrics "
-                    "WHERE video_id = ? AND metric_date BETWEEN ? AND ?",
-                    (vid, start.isoformat(), today.isoformat()),
-                ).fetchone()[0]
+                views = fetch_video_views_in_window(vid, start, today)
                 conn.execute(
                     "INSERT INTO retention_buckets(video_id, window_start, window_end, "
                     "window_kind, views, retention_at_25, retention_at_75, fetched_at) "
