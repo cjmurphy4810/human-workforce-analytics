@@ -10,6 +10,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 
+import projections
 import retention
 
 DB_PATH = Path(__file__).parent / "data.db"
@@ -333,3 +334,50 @@ if not videos.empty:
                 retention_buckets, daily_videos, v_toggle, date.today(),
                 video_id=selected,
             )
+
+
+# --- Growth projections ---
+
+if not daily_channel.empty:
+    st.subheader("Growth Projections")
+    st.caption(
+        "Linear extrapolation of the last 30 days' average daily pace. "
+        "Watch hours start from the cumulative total within the fetch window, "
+        "not lifetime — view as directional, not actuarial."
+    )
+
+    HORIZONS = {"30 days": 30, "90 days": 90, "1 year": 365}
+    horizon_label = st.radio(
+        "Horizon",
+        list(HORIZONS.keys()),
+        index=0,
+        horizontal=True,
+        key="projection_horizon",
+        label_visibility="collapsed",
+    )
+    horizon_days = HORIZONS[horizon_label]
+
+    rates = projections.linear_daily_rates(daily_channel, lookback_days=30)
+    current_totals = {
+        "subscribers": int(latest["subscriber_count"]),
+        "views": int(latest["view_count"]),
+        "hours": int(daily_channel["estimated_minutes_watched"].sum() / 60),
+    }
+    p = projections.project(current_totals, rates, horizon_days)
+
+    p1, p2, p3 = st.columns(3)
+    p1.metric(
+        f"Subscribers in {horizon_label}",
+        f"{p['projected_subscribers']:,}",
+        f"+{p['delta_subscribers']:,} ({rates['net_subs_per_day']:.1f}/day)",
+    )
+    p2.metric(
+        f"Total Views in {horizon_label}",
+        f"{p['projected_views']:,}",
+        f"+{p['delta_views']:,} ({int(rates['views_per_day']):,}/day)",
+    )
+    p3.metric(
+        f"Watch Hours in {horizon_label}",
+        f"{p['projected_hours']:,}",
+        f"+{p['delta_hours']:,} ({rates['hours_per_day']:.1f}/day)",
+    )
