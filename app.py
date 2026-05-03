@@ -233,14 +233,15 @@ def render_retention(rb_full, daily_views, toggle, today, video_id=None):
     """Render the retention summary line + KPI cards for either channel-wide or per-video."""
     snap_start, snap_end, rolling_days = retention.window_bounds_for_toggle(toggle, today)
     rolling_kind = f"rolling{rolling_days}"
-    rolling_start = today - timedelta(days=rolling_days)
 
     rb = rb_full[rb_full["window_kind"] == rolling_kind].copy()
     if video_id:
         rb = rb[rb["video_id"] == video_id]
     rb["window_start"] = pd.to_datetime(rb["window_start"]).dt.date
     rb["window_end"] = pd.to_datetime(rb["window_end"]).dt.date
-    rb = rb[(rb["window_start"] == rolling_start) & (rb["window_end"] == today)]
+    # Take the latest snapshot per video — server TZ may be a day ahead of when
+    # the fetch wrote window_end, so strict equality on `today` drops everything.
+    rb = rb.sort_values("window_end").groupby("video_id", as_index=False).tail(1)
 
     if toggle == "Last month" and not rb.empty:
         dv = daily_views.copy()
