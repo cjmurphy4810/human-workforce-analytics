@@ -2,8 +2,8 @@ name: Fetch YouTube Analytics
 
 on:
   schedule:
-    # Twice daily: 06:00 and 18:00 UTC (~ 1am/1pm Central)
-    - cron: "0 6,18 * * *"
+    # Every 4 hours at :00 UTC (00, 04, 08, 12, 16, 20)
+    - cron: "0 */4 * * *"
   workflow_dispatch:
 
 permissions:
