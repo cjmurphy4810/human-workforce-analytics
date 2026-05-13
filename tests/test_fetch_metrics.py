@@ -48,9 +48,9 @@ def test_write_retention_rolling_windows_writes_three_rows_per_video():
                     "SELECT video_id, window_start, window_end, window_kind, views "
                     "FROM retention_buckets ORDER BY video_id, window_kind"
                 ))
-                assert len(rows) == 6
+                assert len(rows) == 8
                 kinds = sorted({r[3] for r in rows})
-                assert kinds == ["rolling365", "rolling7", "rolling90"]
+                assert kinds == ["rolling30", "rolling365", "rolling7", "rolling90"]
                 assert all(r[4] > 0 for r in rows)
 
 

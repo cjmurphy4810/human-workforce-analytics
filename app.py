@@ -230,9 +230,9 @@ if not daily_channel.empty:
     st.plotly_chart(fig, use_container_width=True)
 
 
-def render_retention(rb_full, daily_views, toggle, today, video_id=None):
+def render_retention(rb_full, toggle, today, video_id=None):
     """Render the retention summary line + KPI cards for either channel-wide or per-video."""
-    snap_start, snap_end, rolling_days = retention.window_bounds_for_toggle(toggle, today)
+    _, _, rolling_days = retention.window_bounds_for_toggle(toggle, today)
     rolling_kind = f"rolling{rolling_days}"
 
     rb = rb_full[rb_full["window_kind"] == rolling_kind].copy()
@@ -243,15 +243,6 @@ def render_retention(rb_full, daily_views, toggle, today, video_id=None):
     # Take the latest snapshot per video — server TZ may be a day ahead of when
     # the fetch wrote window_end, so strict equality on `today` drops everything.
     rb = rb.sort_values("window_end").groupby("video_id", as_index=False).tail(1)
-
-    if toggle == "Last month" and not rb.empty:
-        dv = daily_views.copy()
-        if video_id:
-            dv = dv[dv["video_id"] == video_id]
-        dv["metric_date"] = pd.to_datetime(dv["metric_date"]).dt.date
-        scoped = dv[(dv["metric_date"] >= snap_start) & (dv["metric_date"] <= snap_end)]
-        views_window = scoped.groupby("video_id")["views"].sum().to_dict()
-        rb["views"] = rb["video_id"].map(views_window).fillna(0).astype(int)
 
     snap = retention.aggregate_snapshot(rb)
 
@@ -299,7 +290,7 @@ if not retention_buckets.empty:
         key="retention_range",
         label_visibility="collapsed",
     )
-    render_retention(retention_buckets, daily_videos, toggle, date.today())
+    render_retention(retention_buckets, toggle, date.today())
 else:
     st.subheader("Audience Retention")
     st.info("Retention data still loading. Run `python fetch_metrics.py` to populate.")
@@ -331,7 +322,7 @@ if not videos.empty:
             st.markdown("**Retention buckets for this video**")
             v_toggle = st.session_state.get("video_range", "Last quarter")
             render_retention(
-                retention_buckets, daily_videos, v_toggle, date.today(),
+                retention_buckets, v_toggle, date.today(),
                 video_id=selected,
             )
 

@@ -61,7 +61,7 @@ def test_window_bounds_for_toggle():
         pd.Timestamp("2026-04-25").date(), today, 7,
     )
     assert retention.window_bounds_for_toggle("Last month", today=today) == (
-        pd.Timestamp("2026-04-02").date(), today, 90,
+        pd.Timestamp("2026-04-02").date(), today, 30,
     )
     assert retention.window_bounds_for_toggle("Last quarter", today=today) == (
         pd.Timestamp("2026-02-01").date(), today, 90,

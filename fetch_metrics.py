@@ -25,6 +25,7 @@ from youtube_client import (
 
 ROLLING_WINDOWS = (
     (7, "rolling7"),
+    (30, "rolling30"),
     (90, "rolling90"),
     (365, "rolling365"),
 )
@@ -43,10 +44,16 @@ def write_retention_rolling_windows(video_ids: list[str], today: date | None = N
         for vid in video_ids:
             for days, kind in ROLLING_WINDOWS:
                 start = today - timedelta(days=days)
-                curve = fetch_retention_curve(vid, start, today)
-                if curve is None:
+                try:
+                    curve = fetch_retention_curve(vid, start, today)
+                    if curve is None:
+                        continue
+                    views = fetch_video_views_in_window(vid, start, today)
+                except Exception as e:
+                    # YouTube Analytics returns transient 500s for individual videos; skip and continue
+                    # so one bad video doesn't roll back the whole batch.
+                    print(f"  skip {vid} {kind}: {e.__class__.__name__}")
                     continue
-                views = fetch_video_views_in_window(vid, start, today)
                 conn.execute(
                     "INSERT INTO retention_buckets(video_id, window_start, window_end, "
                     "window_kind, views, retention_at_25, retention_at_75, fetched_at) "

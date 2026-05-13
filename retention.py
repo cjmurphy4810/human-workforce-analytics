@@ -8,11 +8,11 @@ from datetime import date, timedelta
 import pandas as pd
 
 # (rolling_window_days, snapshot_days) per toggle.
-# rolling_window_days = which retention_buckets row to read (7/90/365).
-# snapshot_days = how far back to scope view counts.
+# rolling_window_days = which retention_buckets row to read (7/30/90/365).
+# snapshot_days = how far back to scope view counts (matches rolling kind).
 _TOGGLE_WINDOWS = {
     "Last week":    (7, 7),
-    "Last month":   (90, 30),
+    "Last month":   (30, 30),
     "Last quarter": (90, 90),
     "Last year":    (365, 365),
 }
