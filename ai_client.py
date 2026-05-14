@@ -49,11 +49,11 @@ def classify_video_themes(
     )
 
     raw = response.content[0].text.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    return json.loads(raw.strip())
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start != -1 and end != -1:
+        raw = raw[start:end + 1]
+    return json.loads(raw)
 
 
 def rank_videos_by_news(
@@ -94,7 +94,7 @@ def rank_videos_by_news(
 
     response = client.messages.create(
         model="claude-haiku-4-5-20251001",
-        max_tokens=2048,
+        max_tokens=8192,
         system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
         messages=[{
             "role": "user",
@@ -114,11 +114,11 @@ def rank_videos_by_news(
     )
 
     raw = response.content[0].text.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    return json.loads(raw.strip())
+    start = raw.find("[")
+    end = raw.rfind("]")
+    if start != -1 and end != -1:
+        raw = raw[start:end + 1]
+    return json.loads(raw)
 
 
 def fetch_news_headlines(api_key: str, hours: int = 48) -> list[dict]:
