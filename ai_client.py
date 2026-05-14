@@ -126,15 +126,19 @@ def fetch_news_headlines(api_key: str, hours: int = 48) -> list[dict]:
 
     Returns: list of {title, source, published_at}
     """
+    from datetime import datetime, timezone, timedelta
     client = NewsApiClient(api_key=api_key)
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%S")
     seen_titles: set[str] = set()
     headlines: list[dict] = []
 
-    for category in ("technology", "business", "science"):
+    for query in ("AI workforce automation", "technology jobs future", "business economy workforce"):
         try:
-            resp = client.get_top_headlines(
+            resp = client.get_everything(
+                q=query,
+                from_param=cutoff,
                 language="en",
-                category=category,
+                sort_by="publishedAt",
                 page_size=20,
             )
             for article in resp.get("articles", []):

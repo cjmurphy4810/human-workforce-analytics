@@ -101,7 +101,7 @@ def test_rank_videos_by_news_strips_markdown_fences():
 def test_fetch_news_headlines_returns_deduped_list():
     with patch("ai_client.NewsApiClient") as MockNews:
         instance = MockNews.return_value
-        instance.get_top_headlines.return_value = {
+        instance.get_everything.return_value = {
             "articles": [
                 {"title": "AI takes jobs", "source": {"name": "BBC"}, "publishedAt": "2026-05-13T10:00:00Z"},
                 {"title": "AI takes jobs", "source": {"name": "CNN"}, "publishedAt": "2026-05-13T11:00:00Z"},
@@ -115,7 +115,7 @@ def test_fetch_news_headlines_returns_deduped_list():
 def test_fetch_news_headlines_caps_at_20():
     with patch("ai_client.NewsApiClient") as MockNews:
         instance = MockNews.return_value
-        instance.get_top_headlines.return_value = {
+        instance.get_everything.return_value = {
             "articles": [
                 {"title": f"Story {i}", "source": {"name": "BBC"}, "publishedAt": "2026-05-13T10:00:00Z"}
                 for i in range(30)
@@ -128,12 +128,26 @@ def test_fetch_news_headlines_caps_at_20():
 def test_fetch_news_headlines_category_error_continues():
     with patch("ai_client.NewsApiClient") as MockNews:
         instance = MockNews.return_value
-        def side_effect(language, category, page_size):
-            if category == "technology":
+        call_count = [0]
+        def side_effect(**kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
                 raise Exception("API error")
             return {"articles": [
                 {"title": "Business story", "source": {"name": "Reuters"}, "publishedAt": "2026-05-13T10:00:00Z"}
             ]}
-        instance.get_top_headlines.side_effect = side_effect
+        instance.get_everything.side_effect = side_effect
         result = fetch_news_headlines("fake_key")
     assert any(h["title"] == "Business story" for h in result)
+
+
+def test_classify_video_themes_uses_prompt_caching():
+    mock_client = MagicMock()
+    mock_client.messages.create.return_value = MagicMock(
+        content=[MagicMock(text='{"v1": "AI theme"}')]
+    )
+    videos = [{"video_id": "v1", "title": "T", "description": "D"}]
+    classify_video_themes(mock_client, videos)
+    call_kwargs = mock_client.messages.create.call_args[1]
+    system_block = call_kwargs["system"][0]
+    assert system_block.get("cache_control") == {"type": "ephemeral"}
