@@ -78,3 +78,35 @@ def test_retention_buckets_window_kind_disambiguates():
                     "SELECT COUNT(*) FROM retention_buckets"
                 ).fetchone()[0]
                 assert count == 2
+
+
+def test_publishing_queue_table_created():
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "test.db"
+        with patch("db.DB_PATH", db_path):
+            import db
+            db.init_db()
+            with sqlite3.connect(db_path) as conn:
+                cursor = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='publishing_queue'"
+                )
+                assert cursor.fetchone() is not None
+
+
+def test_publishing_queue_autoincrement_and_columns():
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "test.db"
+        with patch("db.DB_PATH", db_path):
+            import db
+            db.init_db()
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    "INSERT INTO publishing_queue(analyzed_at, videos_analyzed, news_stories_count, result_json) "
+                    "VALUES ('2026-05-13T10:00:00Z', 3, 20, '{\"ranked_videos\": []}')"
+                )
+                row = conn.execute("SELECT * FROM publishing_queue").fetchone()
+                assert row[0] == 1          # id
+                assert row[1] == "2026-05-13T10:00:00Z"  # analyzed_at
+                assert row[2] == 3          # videos_analyzed
+                assert row[3] == 20         # news_stories_count
+                assert "ranked_videos" in row[4]  # result_json

@@ -71,6 +71,13 @@ CREATE INDEX IF NOT EXISTS idx_channel_snapshots_time
     ON channel_snapshots(captured_at);
 CREATE INDEX IF NOT EXISTS idx_retention_buckets_kind_end
     ON retention_buckets(window_kind, window_end);
+CREATE TABLE IF NOT EXISTS publishing_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    analyzed_at TEXT NOT NULL,
+    videos_analyzed INTEGER NOT NULL DEFAULT 0,
+    news_stories_count INTEGER NOT NULL DEFAULT 0,
+    result_json TEXT NOT NULL
+);
 """
 
 
