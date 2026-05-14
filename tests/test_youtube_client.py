@@ -73,6 +73,35 @@ def test_fetch_retention_curve_returns_none_for_empty_response():
     assert result is None
 
 
+def _fake_data_service(items):
+    """Return a mock that mimics data_service().videos().list().execute()."""
+    service = MagicMock()
+    service.videos().list().execute.return_value = {"items": items}
+    return service
+
+
+def test_fetch_video_details_includes_privacy_status():
+    fake_item = {
+        "id": "v1",
+        "snippet": {
+            "title": "Test Video",
+            "description": "A description",
+            "publishedAt": "2026-01-01T00:00:00Z",
+            "thumbnails": {"high": {"url": "http://thumb.jpg"}},
+        },
+        "statistics": {"viewCount": "100", "likeCount": "10", "commentCount": "2"},
+        "contentDetails": {"duration": "PT10M30S"},
+        "status": {"privacyStatus": "private"},
+    }
+    with patch("youtube_client.data_service") as mock_svc:
+        mock_svc.return_value = _fake_data_service([fake_item])
+        result = youtube_client.fetch_video_details(["v1"])
+    assert len(result) == 1
+    assert result[0]["privacy_status"] == "private"
+    assert result[0]["video_id"] == "v1"
+    assert result[0]["view_count"] == 100
+
+
 def _fake_views_response(rows):
     service = MagicMock()
     service.reports().query().execute.return_value = {"rows": rows}

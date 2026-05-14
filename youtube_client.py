@@ -101,7 +101,10 @@ def fetch_video_details(video_ids: list[str]) -> list[dict]:
     details = []
     for i in range(0, len(video_ids), 50):
         batch = video_ids[i : i + 50]
-        resp = yt.videos().list(part="snippet,statistics,contentDetails", id=",".join(batch)).execute()
+        resp = yt.videos().list(
+            part="snippet,statistics,contentDetails,status",
+            id=",".join(batch),
+        ).execute()
         for item in resp["items"]:
             details.append({
                 "video_id": item["id"],
@@ -113,6 +116,7 @@ def fetch_video_details(video_ids: list[str]) -> list[dict]:
                 "view_count": int(item["statistics"].get("viewCount", 0)),
                 "like_count": int(item["statistics"].get("likeCount", 0)),
                 "comment_count": int(item["statistics"].get("commentCount", 0)),
+                "privacy_status": item["status"]["privacyStatus"],
             })
     return details
 
