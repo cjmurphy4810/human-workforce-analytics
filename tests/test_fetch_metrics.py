@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import tempfile
 from datetime import date
@@ -76,3 +77,62 @@ def test_write_retention_rolling_windows_skips_when_curve_is_none():
                     "SELECT count(*) FROM retention_buckets"
                 ).fetchone()[0]
                 assert count == 0
+
+
+# --- write_publishing_queue tests ---
+
+def test_write_publishing_queue_skips_when_no_unpublished_videos():
+    """If all videos are public, skip without calling Claude."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "test.db"
+        with patch("db.DB_PATH", db_path):
+            import db as db_module
+            db_module.init_db()
+            from fetch_metrics import write_publishing_queue
+            with patch("fetch_metrics.classify_video_themes") as mock_classify:
+                write_publishing_queue([
+                    {"video_id": "v1", "privacy_status": "public", "title": "T", "description": "D"}
+                ])
+                mock_classify.assert_not_called()
+
+
+def test_write_publishing_queue_skips_without_anthropic_key(monkeypatch):
+    """If ANTHROPIC_API_KEY is not set, skip gracefully without writing to DB."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "test.db"
+        with patch("db.DB_PATH", db_path):
+            import db as db_module
+            db_module.init_db()
+            from fetch_metrics import write_publishing_queue
+            write_publishing_queue([
+                {"video_id": "v1", "privacy_status": "private", "title": "T", "description": "D"}
+            ])
+            with sqlite3.connect(db_path) as conn:
+                count = conn.execute("SELECT COUNT(*) FROM publishing_queue").fetchone()[0]
+                assert count == 0
+
+
+def test_write_publishing_queue_writes_result_json(monkeypatch):
+    """Happy path: unpublished videos + API key → row written to publishing_queue."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test_key")
+    monkeypatch.delenv("NEWS_API_KEY", raising=False)
+    ranked = [{"rank": 1, "video_id": "v1", "title": "T", "theme": "AI theme", "relevance_score": 0, "why_now": "No news."}]
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "test.db"
+        with patch("db.DB_PATH", db_path):
+            import db as db_module
+            db_module.init_db()
+            from fetch_metrics import write_publishing_queue
+            with patch("fetch_metrics.classify_video_themes", return_value={"v1": "AI theme"}), \
+                 patch("fetch_metrics.rank_videos_by_news", return_value=ranked), \
+                 patch("fetch_metrics.anthropic.Anthropic"):
+                write_publishing_queue([
+                    {"video_id": "v1", "privacy_status": "private", "title": "T", "description": "D"}
+                ])
+            with sqlite3.connect(db_path) as conn:
+                row = conn.execute("SELECT videos_analyzed, result_json FROM publishing_queue").fetchone()
+                assert row[0] == 1
+                result = json.loads(row[1])
+                assert len(result["ranked_videos"]) == 1
+                assert result["ranked_videos"][0]["video_id"] == "v1"

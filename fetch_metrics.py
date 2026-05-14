@@ -6,9 +6,13 @@ Run twice daily via GitHub Actions. Stores:
 - Daily metrics from the YouTube Analytics API (last 7 days, refreshed each run)
 """
 
+import json
 import os
 from datetime import date, datetime, timedelta, timezone
 
+import anthropic
+
+from ai_client import classify_video_themes, fetch_news_headlines, rank_videos_by_news
 from db import get_conn, init_db
 from youtube_client import (
     fetch_all_video_ids,
@@ -65,6 +69,55 @@ def write_retention_rolling_windows(video_ids: list[str], today: date | None = N
                      int(views), curve["retention_at_25"], curve["retention_at_75"],
                      fetched_at),
                 )
+
+
+def write_publishing_queue(videos: list[dict]) -> None:
+    """Classify unpublished video themes, rank by news relevance, persist to DB."""
+    unpublished = [v for v in videos if v.get("privacy_status") != "public"]
+    if not unpublished:
+        print("  No unpublished videos, skipping publishing queue.")
+        return
+
+    print(f"  Found {len(unpublished)} unpublished videos.")
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not anthropic_key:
+        print("  ANTHROPIC_API_KEY not set, skipping publishing queue.")
+        return
+
+    ai = anthropic.Anthropic(api_key=anthropic_key)
+    analyzed_at = datetime.now(timezone.utc).isoformat()
+
+    print("  Classifying video themes...")
+    themes = classify_video_themes(ai, unpublished)
+    videos_with_themes = [
+        {**v, "theme": themes.get(v["video_id"], "General workforce topics")}
+        for v in unpublished
+    ]
+
+    headlines: list[dict] = []
+    news_key = os.environ.get("NEWS_API_KEY")
+    if news_key:
+        print("  Fetching news headlines...")
+        headlines = fetch_news_headlines(news_key)
+    else:
+        print("  NEWS_API_KEY not set, skipping news fetch.")
+
+    print("  Ranking videos by news relevance...")
+    ranked = rank_videos_by_news(ai, videos_with_themes, headlines)
+
+    result = {
+        "news_available": bool(headlines),
+        "ranked_videos": ranked,
+        "news_headlines": headlines,
+    }
+
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO publishing_queue(analyzed_at, videos_analyzed, news_stories_count, result_json) "
+            "VALUES (?, ?, ?, ?)",
+            (analyzed_at, len(unpublished), len(headlines), json.dumps(result)),
+        )
+    print(f"  Publishing queue written: {len(ranked)} videos ranked against {len(headlines)} headlines.")
 
 
 def main() -> None:
@@ -153,6 +206,12 @@ def main() -> None:
 
     print("Fetching retention curves for rolling windows (7/90/365 days)...")
     write_retention_rolling_windows([v["video_id"] for v in videos])
+
+    print("Analyzing publishing queue...")
+    try:
+        write_publishing_queue(videos)
+    except Exception as e:
+        print(f"  Publishing queue failed ({e.__class__.__name__}), skipping.")
 
     print("Done.")
 
