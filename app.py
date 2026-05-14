@@ -425,13 +425,13 @@ else:
                 with left:
                     st.markdown(f"**#{item['rank']} — {item['title']}**")
                     st.caption(f"🏷 {item.get('theme', '')}")
-                    st.markdown(f"*{item.get('why_now', '')}*")
+                    st.markdown(f"<span style='color:gray; font-style:italic;'>{item.get('why_now', '')}</span>", unsafe_allow_html=True)
                 with right:
                     st.metric("Relevance", f"{score}/10")
                     st.progress(score / 10)
 
     headlines = result.get("news_headlines", [])
     if headlines:
-        with st.expander(f"News headlines used ({len(headlines)})"):
+        with st.expander("News headlines used"):
             for h in headlines:
                 st.markdown(f"- **{h['title']}** — {h.get('source', '')}")
