@@ -10,6 +10,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 
+import html
 import json
 
 import projections
@@ -419,15 +420,20 @@ else:
         st.info("No unpublished videos in queue.")
     else:
         for item in ranked:
-            score = item.get("relevance_score", 0)
+            raw_score = item.get("relevance_score", 0)
+            try:
+                score = float(raw_score)
+            except (TypeError, ValueError):
+                score = 0.0
+            score = max(0.0, min(10.0, score))
             with st.container(border=True):
                 left, right = st.columns([5, 1])
                 with left:
-                    st.markdown(f"**#{item['rank']} — {item['title']}**")
+                    st.markdown(f"**#{item.get('rank', '?')} — {item.get('title', 'Untitled')}**")
                     st.caption(f"🏷 {item.get('theme', '')}")
-                    st.markdown(f"<span style='color:gray; font-style:italic;'>{item.get('why_now', '')}</span>", unsafe_allow_html=True)
+                    st.markdown(f"<span style='color:gray; font-style:italic;'>{html.escape(item.get('why_now', ''))}</span>", unsafe_allow_html=True)
                 with right:
-                    st.metric("Relevance", f"{score}/10")
+                    st.metric("Relevance", f"{score:.0f}/10")
                     st.progress(score / 10)
 
     headlines = result.get("news_headlines", [])
