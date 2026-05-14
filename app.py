@@ -10,6 +10,8 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 
+import json
+
 import projections
 import retention
 
@@ -96,6 +98,10 @@ daily_videos = load(
 retention_buckets = load(
     "SELECT video_id, window_start, window_end, window_kind, views, "
     "retention_at_25, retention_at_75 FROM retention_buckets"
+)
+publishing_queue = load(
+    "SELECT analyzed_at, videos_analyzed, news_stories_count, result_json "
+    "FROM publishing_queue ORDER BY analyzed_at DESC LIMIT 1"
 )
 
 if channel_snapshots.empty:
@@ -372,3 +378,60 @@ if not daily_channel.empty:
         f"{p['projected_hours']:,}",
         f"+{p['delta_hours']:,} ({rates['hours_per_day']:.1f}/day)",
     )
+
+
+# --- Publishing Queue ---
+
+st.subheader("Publishing Queue")
+st.caption(
+    "Unpublished episodes ranked by relevance to today's top news stories. "
+    "Updated every 4 hours. Use this to decide which story to schedule in YouTube Studio."
+)
+
+if publishing_queue.empty:
+    st.info(
+        "No publishing queue data yet. "
+        "Set ANTHROPIC_API_KEY and NEWS_API_KEY, then run `python fetch_metrics.py`."
+    )
+else:
+    pq = publishing_queue.iloc[0]
+    analyzed_at = pd.to_datetime(pq["analyzed_at"]).tz_localize(None)
+    hours_ago = (pd.Timestamp.utcnow().tz_localize(None) - analyzed_at).total_seconds() / 3600
+
+    meta_col, warn_col = st.columns([4, 1])
+    with meta_col:
+        st.caption(
+            f"Analyzed {analyzed_at.strftime('%b %d, %H:%M UTC')} · "
+            f"{int(pq['videos_analyzed'])} unpublished videos · "
+            f"{int(pq['news_stories_count'])} news stories"
+        )
+    with warn_col:
+        if hours_ago > 8:
+            st.warning(f"⚠ {hours_ago:.0f}h stale")
+
+    result = json.loads(pq["result_json"])
+    ranked = result.get("ranked_videos", [])
+
+    if not result.get("news_available"):
+        st.warning("News headlines unavailable — videos shown by theme only, not ranked by current events.")
+
+    if not ranked:
+        st.info("No unpublished videos in queue.")
+    else:
+        for item in ranked:
+            score = item.get("relevance_score", 0)
+            with st.container(border=True):
+                left, right = st.columns([5, 1])
+                with left:
+                    st.markdown(f"**#{item['rank']} — {item['title']}**")
+                    st.caption(f"🏷 {item.get('theme', '')}")
+                    st.markdown(f"*{item.get('why_now', '')}*")
+                with right:
+                    st.metric("Relevance", f"{score}/10")
+                    st.progress(score / 10)
+
+    headlines = result.get("news_headlines", [])
+    if headlines:
+        with st.expander(f"News headlines used ({len(headlines)})"):
+            for h in headlines:
+                st.markdown(f"- **{h['title']}** — {h.get('source', '')}")
