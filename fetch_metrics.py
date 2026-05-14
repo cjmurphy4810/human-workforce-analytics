@@ -90,10 +90,18 @@ def main() -> None:
     end = date.today()
     start = end - timedelta(days=90)
     print(f"Fetching daily channel metrics {start} -> {end}...")
-    daily_channel = fetch_daily_channel_metrics(start, end, channel_id)
+    try:
+        daily_channel = fetch_daily_channel_metrics(start, end, channel_id)
+    except Exception as e:
+        print(f"  daily channel metrics failed ({e.__class__.__name__}), skipping.")
+        daily_channel = []
 
     print(f"Fetching per-video totals {start} -> {end}...")
-    daily_video = fetch_video_period_metrics(start, end, channel_id)
+    try:
+        daily_video = fetch_video_period_metrics(start, end, channel_id)
+    except Exception as e:
+        print(f"  per-video totals failed ({e.__class__.__name__}), skipping.")
+        daily_video = []
 
     with get_conn() as conn:
         conn.execute(
