@@ -61,12 +61,36 @@ def test_rank_videos_by_news_returns_ranked_list():
     mock_client.messages.create.return_value = MagicMock(
         content=[MagicMock(text=json.dumps(ranked))]
     )
-    videos = [{"video_id": "v1", "title": "T", "theme": "AI"}]
+    videos = [{"video_id": "v1", "title": "T", "theme": "AI", "scheduled_at": "2026-06-15T18:00:00Z"}]
     headlines = [{"title": "Google lays off 1000", "source": "Reuters", "published_at": "2026-05-13T10:00:00Z"}]
     result = rank_videos_by_news(mock_client, videos, headlines)
     assert result[0]["rank"] == 1
     assert result[0]["relevance_score"] == 9
+    assert result[0]["scheduled_at"] == "2026-06-15T18:00:00Z"
     mock_client.messages.create.assert_called_once()
+
+
+def test_rank_videos_by_news_scheduled_at_none_when_not_set():
+    mock_client = MagicMock()
+    ranked = [
+        {"rank": 1, "video_id": "v1", "title": "T", "theme": "AI", "relevance_score": 5, "why_now": "Somewhat timely."},
+    ]
+    mock_client.messages.create.return_value = MagicMock(
+        content=[MagicMock(text=json.dumps(ranked))]
+    )
+    videos = [{"video_id": "v1", "title": "T", "theme": "AI"}]
+    headlines = [{"title": "Some headline", "source": "BBC", "published_at": "2026-05-15T10:00:00Z"}]
+    result = rank_videos_by_news(mock_client, videos, headlines)
+    assert result[0]["scheduled_at"] is None
+
+
+def test_rank_videos_by_news_empty_headlines_includes_scheduled_at():
+    mock_client = MagicMock()
+    videos = [{"video_id": "v1", "title": "T", "theme": "AI", "scheduled_at": "2026-07-01T12:00:00Z"}]
+    result = rank_videos_by_news(mock_client, videos, [])
+    assert result[0]["relevance_score"] == 0
+    assert result[0]["scheduled_at"] == "2026-07-01T12:00:00Z"
+    mock_client.messages.create.assert_not_called()
 
 
 def test_rank_videos_by_news_empty_headlines_skips_api_and_scores_zero():

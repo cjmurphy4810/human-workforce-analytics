@@ -63,12 +63,14 @@ def rank_videos_by_news(
 ) -> list[dict]:
     """Rank unpublished videos by relevance to today's news headlines.
 
-    videos_with_themes: list of dicts with keys video_id, title, theme.
+    videos_with_themes: list of dicts with keys video_id, title, theme, scheduled_at.
     headlines: list of dicts with keys title, source, published_at.
-    Returns: list of {rank, video_id, title, theme, relevance_score, why_now} sorted rank 1 first.
+    Returns: list of {rank, video_id, title, theme, relevance_score, why_now, scheduled_at} sorted rank 1 first.
     """
     if not videos_with_themes:
         return []
+
+    scheduled_lookup = {v["video_id"]: v.get("scheduled_at") for v in videos_with_themes}
 
     if not headlines:
         return [
@@ -79,6 +81,7 @@ def rank_videos_by_news(
                 "theme": v["theme"],
                 "relevance_score": 0,
                 "why_now": "News data unavailable for ranking.",
+                "scheduled_at": v.get("scheduled_at"),
             }
             for i, v in enumerate(videos_with_themes)
         ]
@@ -118,7 +121,10 @@ def rank_videos_by_news(
     end = raw.rfind("]")
     if start != -1 and end != -1:
         raw = raw[start:end + 1]
-    return json.loads(raw)
+    ranked = json.loads(raw)
+    for item in ranked:
+        item["scheduled_at"] = scheduled_lookup.get(item.get("video_id"))
+    return ranked
 
 
 def fetch_news_headlines(api_key: str, hours: int = 48) -> list[dict]:
