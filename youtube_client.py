@@ -117,6 +117,7 @@ def fetch_video_details(video_ids: list[str]) -> list[dict]:
                 "like_count": int(item["statistics"].get("likeCount", 0)),
                 "comment_count": int(item["statistics"].get("commentCount", 0)),
                 "privacy_status": item["status"]["privacyStatus"],
+                "scheduled_at": item["status"].get("publishAt"),
             })
     return details
 

@@ -91,15 +91,35 @@ def test_fetch_video_details_includes_privacy_status():
         },
         "statistics": {"viewCount": "100", "likeCount": "10", "commentCount": "2"},
         "contentDetails": {"duration": "PT10M30S"},
-        "status": {"privacyStatus": "private"},
+        "status": {"privacyStatus": "private", "publishAt": "2026-06-15T18:00:00Z"},
     }
     with patch("youtube_client.data_service") as mock_svc:
         mock_svc.return_value = _fake_data_service([fake_item])
         result = youtube_client.fetch_video_details(["v1"])
     assert len(result) == 1
     assert result[0]["privacy_status"] == "private"
+    assert result[0]["scheduled_at"] == "2026-06-15T18:00:00Z"
     assert result[0]["video_id"] == "v1"
     assert result[0]["view_count"] == 100
+
+
+def test_fetch_video_details_scheduled_at_is_none_when_not_set():
+    fake_item = {
+        "id": "v2",
+        "snippet": {
+            "title": "Unscheduled Video",
+            "description": "",
+            "publishedAt": "2026-01-01T00:00:00Z",
+            "thumbnails": {},
+        },
+        "statistics": {"viewCount": "0", "likeCount": "0", "commentCount": "0"},
+        "contentDetails": {"duration": "PT5M"},
+        "status": {"privacyStatus": "private"},
+    }
+    with patch("youtube_client.data_service") as mock_svc:
+        mock_svc.return_value = _fake_data_service([fake_item])
+        result = youtube_client.fetch_video_details(["v2"])
+    assert result[0]["scheduled_at"] is None
 
 
 def _fake_views_response(rows):
