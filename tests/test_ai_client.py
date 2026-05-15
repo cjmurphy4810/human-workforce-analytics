@@ -93,6 +93,21 @@ def test_rank_videos_by_news_empty_headlines_includes_scheduled_at():
     mock_client.messages.create.assert_not_called()
 
 
+def test_rank_videos_by_news_unknown_video_id_from_claude_gets_none_scheduled_at():
+    mock_client = MagicMock()
+    ranked = [
+        {"rank": 1, "video_id": "hallucinated_id", "title": "T", "theme": "AI",
+         "relevance_score": 8, "why_now": "Timely."},
+    ]
+    mock_client.messages.create.return_value = MagicMock(
+        content=[MagicMock(text=json.dumps(ranked))]
+    )
+    videos = [{"video_id": "v1", "title": "T", "theme": "AI", "scheduled_at": "2026-06-01T00:00:00Z"}]
+    headlines = [{"title": "Some headline", "source": "BBC", "published_at": "2026-05-15T10:00:00Z"}]
+    result = rank_videos_by_news(mock_client, videos, headlines)
+    assert result[0]["scheduled_at"] is None
+
+
 def test_rank_videos_by_news_empty_headlines_skips_api_and_scores_zero():
     mock_client = MagicMock()
     videos = [{"video_id": "v1", "title": "T", "theme": "AI"}]
