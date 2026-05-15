@@ -419,18 +419,44 @@ else:
     if not ranked:
         st.info("No unpublished videos in queue.")
     else:
+        today = date.today()
         for item in ranked:
+            rank = item.get("rank", "?")
             raw_score = item.get("relevance_score", 0)
             try:
                 score = float(raw_score)
             except (TypeError, ValueError):
                 score = 0.0
             score = max(0.0, min(10.0, score))
+
+            scheduled_raw = item.get("scheduled_at")
+            if scheduled_raw:
+                scheduled_str = pd.to_datetime(scheduled_raw).strftime("%b %d, %Y")
+            else:
+                scheduled_str = "Not scheduled"
+
+            try:
+                rec_date = today + timedelta(days=int(rank))
+                rec_str = rec_date.strftime("%b %d, %Y")
+            except (TypeError, ValueError):
+                rec_date = None
+                rec_str = "—"
+
+            show_earlier = (
+                scheduled_raw is not None
+                and rec_date is not None
+                and rec_date < pd.to_datetime(scheduled_raw).date()
+            )
+
             with st.container(border=True):
                 left, right = st.columns([5, 1])
                 with left:
-                    st.markdown(f"**#{item.get('rank', '?')} — {item.get('title', 'Untitled')}**")
+                    st.markdown(f"**#{rank} — {item.get('title', 'Untitled')}**")
                     st.caption(f"🏷 {item.get('theme', '')}")
+                    date_line = f"📅 Scheduled: {scheduled_str} → Recommend: {rec_str}"
+                    if show_earlier:
+                        date_line += " ⚡ Earlier"
+                    st.caption(date_line)
                     st.markdown(f"<span style='color:gray; font-style:italic;'>{html.escape(item.get('why_now', ''))}</span>", unsafe_allow_html=True)
                 with right:
                     st.metric("Relevance", f"{score:.0f}/10")
