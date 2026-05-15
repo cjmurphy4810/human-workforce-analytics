@@ -419,7 +419,7 @@ else:
     if not ranked:
         st.info("No unpublished videos in queue.")
     else:
-        today = date.today()
+        today = pd.Timestamp.utcnow().date()
         for item in ranked:
             rank = item.get("rank", "?")
             raw_score = item.get("relevance_score", 0)
