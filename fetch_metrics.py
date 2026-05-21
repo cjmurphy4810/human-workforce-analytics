@@ -228,7 +228,10 @@ def main() -> None:
                  d["average_view_duration"], d["likes"], d["subscribers_gained"]),
             )
 
-    write_geo_metrics(daily_geo)
+    try:
+        write_geo_metrics(daily_geo)
+    except Exception as e:
+        print(f"  geo metrics write failed ({e.__class__.__name__}), skipping.")
 
     print("Fetching retention curves for rolling windows (7/90/365 days)...")
     write_retention_rolling_windows([v["video_id"] for v in videos])

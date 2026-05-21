@@ -137,12 +137,12 @@ def test_daily_geo_metrics_primary_key_constraint():
                     "INSERT INTO daily_geo_metrics(metric_date, country_code, views, "
                     "subscribers_gained, likes) VALUES ('2026-05-01', 'IN', 100, 5, 10)"
                 )
+                raised = False
                 try:
                     conn.execute(
                         "INSERT INTO daily_geo_metrics(metric_date, country_code, views, "
                         "subscribers_gained, likes) VALUES ('2026-05-01', 'IN', 200, 10, 20)"
                     )
-                    raised = False
                 except sqlite3.IntegrityError:
                     raised = True
                 assert raised
