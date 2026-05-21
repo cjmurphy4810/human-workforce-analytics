@@ -136,3 +136,68 @@ def test_write_publishing_queue_writes_result_json(monkeypatch):
                 result = json.loads(row[1])
                 assert len(result["ranked_videos"]) == 1
                 assert result["ranked_videos"][0]["video_id"] == "v1"
+
+
+def test_write_geo_metrics_upserts_rows():
+    """write_geo_metrics inserts rows and upserts on conflict without adding duplicates."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "test.db"
+        with patch("db.DB_PATH", db_path):
+            import db
+            db.init_db()
+
+            from fetch_metrics import write_geo_metrics
+
+            rows = [
+                {"metric_date": "2026-05-01", "country_code": "IN",
+                 "views": 1000, "subscribers_gained": 20, "likes": 50},
+                {"metric_date": "2026-05-01", "country_code": "US",
+                 "views": 200, "subscribers_gained": 3, "likes": 8},
+            ]
+            write_geo_metrics(rows)
+
+            with sqlite3.connect(db_path) as conn:
+                count = conn.execute(
+                    "SELECT COUNT(*) FROM daily_geo_metrics"
+                ).fetchone()[0]
+                assert count == 2
+
+                views = conn.execute(
+                    "SELECT views FROM daily_geo_metrics "
+                    "WHERE metric_date='2026-05-01' AND country_code='IN'"
+                ).fetchone()[0]
+                assert views == 1000
+
+            # Upsert: re-insert same key with updated views — row count stays at 2
+            write_geo_metrics([
+                {"metric_date": "2026-05-01", "country_code": "IN",
+                 "views": 1500, "subscribers_gained": 25, "likes": 60},
+            ])
+
+            with sqlite3.connect(db_path) as conn:
+                count = conn.execute(
+                    "SELECT COUNT(*) FROM daily_geo_metrics"
+                ).fetchone()[0]
+                assert count == 2
+
+                views = conn.execute(
+                    "SELECT views FROM daily_geo_metrics "
+                    "WHERE metric_date='2026-05-01' AND country_code='IN'"
+                ).fetchone()[0]
+                assert views == 1500
+
+
+def test_write_geo_metrics_empty_list_is_noop():
+    """Calling write_geo_metrics with an empty list writes nothing and doesn't error."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "test.db"
+        with patch("db.DB_PATH", db_path):
+            import db
+            db.init_db()
+            from fetch_metrics import write_geo_metrics
+            write_geo_metrics([])
+            with sqlite3.connect(db_path) as conn:
+                count = conn.execute(
+                    "SELECT COUNT(*) FROM daily_geo_metrics"
+                ).fetchone()[0]
+                assert count == 0
