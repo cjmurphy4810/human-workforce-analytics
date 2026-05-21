@@ -235,6 +235,30 @@ def fetch_video_views_in_window(video_id: str, start: date, end: date) -> int:
     return int(rows[0][0])
 
 
+def fetch_daily_geo_metrics(start: date, end: date, channel_id: str | None = None) -> list[dict]:
+    """Fetch daily views, subscribers_gained, and likes broken down by country."""
+    yt = analytics_service()
+    ids = f"channel=={channel_id}" if channel_id else "channel==MINE"
+    resp = yt.reports().query(
+        ids=ids,
+        startDate=start.isoformat(),
+        endDate=end.isoformat(),
+        metrics="views,subscribersGained,likes",
+        dimensions="day,country",
+    ).execute()
+    rows = resp.get("rows", [])
+    return [
+        {
+            "metric_date": r[0],
+            "country_code": r[1],
+            "views": int(r[2]),
+            "subscribers_gained": int(r[3]),
+            "likes": int(r[4]),
+        }
+        for r in rows
+    ]
+
+
 def parse_iso8601_duration(duration: str) -> int:
     """Convert ISO 8601 duration (PT1H2M3S) to seconds."""
     m = re.match(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", duration)

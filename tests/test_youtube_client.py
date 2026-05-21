@@ -146,3 +146,56 @@ def test_fetch_video_views_in_window_returns_zero_when_empty():
             video_id="v1", start=date(2026, 1, 1), end=date(2026, 1, 8)
         )
     assert views == 0
+
+
+def _fake_geo_response(rows):
+    """Return a mock that mimics analytics_service().reports().query().execute()."""
+    service = MagicMock()
+    service.reports().query().execute.return_value = {"rows": rows}
+    return service
+
+
+def test_fetch_daily_geo_metrics_parses_rows():
+    """Each API row [date, country, views, subs, likes] maps to correct dict keys."""
+    rows = [
+        ["2026-05-01", "IN", 12345, 210, 500],
+        ["2026-05-01", "US", 543, 12, 30],
+    ]
+    with patch("youtube_client.analytics_service") as mock_svc:
+        mock_svc.return_value = _fake_geo_response(rows)
+        result = youtube_client.fetch_daily_geo_metrics(
+            start=date(2026, 5, 1), end=date(2026, 5, 7)
+        )
+
+    assert len(result) == 2
+    assert result[0] == {
+        "metric_date": "2026-05-01",
+        "country_code": "IN",
+        "views": 12345,
+        "subscribers_gained": 210,
+        "likes": 500,
+    }
+    assert result[1]["country_code"] == "US"
+    assert result[1]["views"] == 543
+
+
+def test_fetch_daily_geo_metrics_returns_empty_list_when_no_rows():
+    """Empty API response returns an empty list without error."""
+    with patch("youtube_client.analytics_service") as mock_svc:
+        mock_svc.return_value = _fake_geo_response([])
+        result = youtube_client.fetch_daily_geo_metrics(
+            start=date(2026, 5, 1), end=date(2026, 5, 7)
+        )
+    assert result == []
+
+
+def test_fetch_daily_geo_metrics_uses_channel_id_when_provided():
+    """When channel_id is given, the ids param is 'channel==<id>', not 'channel==MINE'."""
+    with patch("youtube_client.analytics_service") as mock_svc:
+        mock_svc.return_value = _fake_geo_response([])
+        youtube_client.fetch_daily_geo_metrics(
+            start=date(2026, 5, 1), end=date(2026, 5, 7),
+            channel_id="UCHDU3z8f5_HJzJL1w2J2EaQ",
+        )
+        call_kwargs = mock_svc.return_value.reports.return_value.query.call_args[1]
+        assert call_kwargs["ids"] == "channel==UCHDU3z8f5_HJzJL1w2J2EaQ"
