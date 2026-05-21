@@ -46,7 +46,10 @@ def load(query: str) -> pd.DataFrame:
     if not DB_PATH.exists():
         return pd.DataFrame()
     with sqlite3.connect(DB_PATH) as conn:
-        return pd.read_sql_query(query, conn)
+        try:
+            return pd.read_sql_query(query, conn)
+        except Exception:
+            return pd.DataFrame()
 
 
 RANGES = {
