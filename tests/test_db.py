@@ -110,3 +110,39 @@ def test_publishing_queue_autoincrement_and_columns():
                 assert row[2] == 3          # videos_analyzed
                 assert row[3] == 20         # news_stories_count
                 assert "ranked_videos" in row[4]  # result_json
+
+
+def test_daily_geo_metrics_table_created():
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "test.db"
+        with patch("db.DB_PATH", db_path):
+            import db
+            db.init_db()
+            with sqlite3.connect(db_path) as conn:
+                cursor = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='daily_geo_metrics'"
+                )
+                assert cursor.fetchone() is not None
+
+
+def test_daily_geo_metrics_primary_key_constraint():
+    """Duplicate (metric_date, country_code) must raise IntegrityError."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "test.db"
+        with patch("db.DB_PATH", db_path):
+            import db
+            db.init_db()
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    "INSERT INTO daily_geo_metrics(metric_date, country_code, views, "
+                    "subscribers_gained, likes) VALUES ('2026-05-01', 'IN', 100, 5, 10)"
+                )
+                try:
+                    conn.execute(
+                        "INSERT INTO daily_geo_metrics(metric_date, country_code, views, "
+                        "subscribers_gained, likes) VALUES ('2026-05-01', 'IN', 200, 10, 20)"
+                    )
+                    raised = False
+                except sqlite3.IntegrityError:
+                    raised = True
+                assert raised
