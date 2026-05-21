@@ -18,6 +18,7 @@ from youtube_client import (
     fetch_all_video_ids,
     fetch_channel_stats,
     fetch_daily_channel_metrics,
+    fetch_daily_geo_metrics,
     fetch_retention_curve,
     fetch_video_details,
     fetch_video_period_metrics,
@@ -120,6 +121,22 @@ def write_publishing_queue(videos: list[dict]) -> None:
     print(f"  Publishing queue written: {len(ranked)} videos ranked against {len(headlines)} headlines.")
 
 
+def write_geo_metrics(rows: list[dict]) -> None:
+    """Persist geographic metrics to daily_geo_metrics table with upsert."""
+    with get_conn() as conn:
+        for d in rows:
+            conn.execute(
+                "INSERT INTO daily_geo_metrics(metric_date, country_code, views, "
+                "subscribers_gained, likes) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(metric_date, country_code) DO UPDATE SET "
+                "views=excluded.views, "
+                "subscribers_gained=excluded.subscribers_gained, "
+                "likes=excluded.likes",
+                (d["metric_date"], d["country_code"], d["views"],
+                 d["subscribers_gained"], d["likes"]),
+            )
+
+
 def main() -> None:
     init_db()
     requested = os.environ.get("YT_CHANNEL_ID") or None
@@ -155,6 +172,13 @@ def main() -> None:
     except Exception as e:
         print(f"  per-video totals failed ({e.__class__.__name__}), skipping.")
         daily_video = []
+
+    print(f"Fetching daily geo metrics {start} -> {end}...")
+    try:
+        daily_geo = fetch_daily_geo_metrics(start, end, channel_id)
+    except Exception as e:
+        print(f"  daily geo metrics failed ({e.__class__.__name__}), skipping.")
+        daily_geo = []
 
     with get_conn() as conn:
         conn.execute(
@@ -203,6 +227,11 @@ def main() -> None:
                 (d["metric_date"], d["video_id"], d["views"], d["estimated_minutes_watched"],
                  d["average_view_duration"], d["likes"], d["subscribers_gained"]),
             )
+
+    try:
+        write_geo_metrics(daily_geo)
+    except Exception as e:
+        print(f"  geo metrics write failed ({e.__class__.__name__}), skipping.")
 
     print("Fetching retention curves for rolling windows (7/90/365 days)...")
     write_retention_rolling_windows([v["video_id"] for v in videos])

@@ -71,6 +71,17 @@ CREATE INDEX IF NOT EXISTS idx_channel_snapshots_time
     ON channel_snapshots(captured_at);
 CREATE INDEX IF NOT EXISTS idx_retention_buckets_kind_end
     ON retention_buckets(window_kind, window_end);
+CREATE TABLE IF NOT EXISTS daily_geo_metrics (
+    metric_date        TEXT NOT NULL,
+    country_code       TEXT NOT NULL,
+    views              INTEGER,
+    subscribers_gained INTEGER,
+    likes              INTEGER,
+    PRIMARY KEY (metric_date, country_code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_daily_geo_metrics_date
+    ON daily_geo_metrics(metric_date);
 CREATE TABLE IF NOT EXISTS publishing_queue (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     analyzed_at TEXT NOT NULL,
