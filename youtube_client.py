@@ -236,7 +236,11 @@ def fetch_video_views_in_window(video_id: str, start: date, end: date) -> int:
 
 
 def fetch_daily_geo_metrics(start: date, end: date, channel_id: str | None = None) -> list[dict]:
-    """Fetch daily views, subscribers_gained, and likes broken down by country."""
+    """Fetch aggregate views, subscribers_gained, and likes broken down by country.
+
+    The YouTube Analytics API does not support dimensions=day,country together;
+    this returns period totals per country. metric_date is set to end (period end).
+    """
     yt = analytics_service()
     ids = f"channel=={channel_id}" if channel_id else "channel==MINE"
     resp = yt.reports().query(
@@ -244,16 +248,16 @@ def fetch_daily_geo_metrics(start: date, end: date, channel_id: str | None = Non
         startDate=start.isoformat(),
         endDate=end.isoformat(),
         metrics="views,subscribersGained,likes",
-        dimensions="day,country",
+        dimensions="country",
     ).execute()
     rows = resp.get("rows", [])
     return [
         {
-            "metric_date": r[0],
-            "country_code": r[1],
-            "views": int(r[2]),
-            "subscribers_gained": int(r[3]),
-            "likes": int(r[4]),
+            "metric_date": end.isoformat(),
+            "country_code": r[0],
+            "views": int(r[1]),
+            "subscribers_gained": int(r[2]),
+            "likes": int(r[3]),
         }
         for r in rows
     ]

@@ -215,48 +215,29 @@ if not daily_channel.empty:
 
 if not daily_geo.empty:
     st.subheader("Geographic Trends")
-    st.caption(
-        "Daily views, subscribers gained, and likes for the top 5 countries by views "
-        "in the selected range."
-    )
-    days = range_picker("geo_range")
-    geo = filter_days(daily_geo, "metric_date", days).copy()
+    geo = daily_geo.copy()
     geo["country"] = geo["country_code"].map(lambda c: COUNTRY_NAMES.get(c, c))
-
-    top5 = (
-        geo.groupby("country")["views"].sum()
-        .nlargest(5).index.tolist()
-    )
-    geo = geo[geo["country"].isin(top5)]
-
+    latest_geo_date = geo["metric_date"].max()
+    geo = geo[geo["metric_date"] == latest_geo_date].sort_values("views", ascending=False).head(10)
     if geo.empty:
-        st.info("No geographic data for this range yet.")
+        st.info("No geographic data yet.")
     else:
         fig = make_subplots(
-            rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.07,
-            subplot_titles=("Views per day", "Subscribers gained per day", "Likes per day"),
+            rows=1, cols=3,
+            subplot_titles=("Views", "Subscribers Gained", "Likes"),
+            shared_yaxes=True,
         )
         colors = px.colors.qualitative.Plotly
-        for i, country in enumerate(top5):
-            cdf = geo[geo["country"] == country].sort_values("metric_date")
-            color = colors[i % len(colors)]
-            fig.add_scatter(
-                x=cdf["metric_date"], y=cdf["views"],
-                name=country, mode="lines", line=dict(color=color),
-                legendgroup=country, row=1, col=1,
-            )
-            fig.add_scatter(
-                x=cdf["metric_date"], y=cdf["subscribers_gained"],
-                name=country, mode="lines", line=dict(color=color),
-                legendgroup=country, showlegend=False, row=2, col=1,
-            )
-            fig.add_scatter(
-                x=cdf["metric_date"], y=cdf["likes"],
-                name=country, mode="lines", line=dict(color=color),
-                legendgroup=country, showlegend=False, row=3, col=1,
-            )
-        fig.update_layout(height=720, hovermode="x unified")
+        fig.add_bar(x=geo["views"], y=geo["country"], orientation="h",
+                    name="Views", marker_color=colors[0], row=1, col=1)
+        fig.add_bar(x=geo["subscribers_gained"], y=geo["country"], orientation="h",
+                    name="Subscribers", marker_color=colors[1], row=1, col=2)
+        fig.add_bar(x=geo["likes"], y=geo["country"], orientation="h",
+                    name="Likes", marker_color=colors[2], row=1, col=3)
+        fig.update_layout(height=420, showlegend=False)
+        fig.update_yaxes(autorange="reversed")
         st.plotly_chart(fig, use_container_width=True)
+        st.caption(f"Snapshot: {latest_geo_date} · covers the preceding 90 days")
 else:
     st.subheader("Geographic Trends")
     st.info("Geographic data still loading. Run `python fetch_metrics.py` to populate.")

@@ -156,10 +156,10 @@ def _fake_geo_response(rows):
 
 
 def test_fetch_daily_geo_metrics_parses_rows():
-    """Each API row [date, country, views, subs, likes] maps to correct dict keys."""
+    """Each API row [country, views, subs, likes] maps to correct dict keys; metric_date is end."""
     rows = [
-        ["2026-05-01", "IN", 12345, 210, 500],
-        ["2026-05-01", "US", 543, 12, 30],
+        ["IN", 12345, 210, 500],
+        ["US", 543, 12, 30],
     ]
     with patch("youtube_client.analytics_service") as mock_svc:
         mock_svc.return_value = _fake_geo_response(rows)
@@ -169,7 +169,7 @@ def test_fetch_daily_geo_metrics_parses_rows():
 
     assert len(result) == 2
     assert result[0] == {
-        "metric_date": "2026-05-01",
+        "metric_date": "2026-05-07",
         "country_code": "IN",
         "views": 12345,
         "subscribers_gained": 210,
