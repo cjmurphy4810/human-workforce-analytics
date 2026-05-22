@@ -37,11 +37,14 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          cp data.db /tmp/data.db.new
+          git fetch origin main
+          git reset --hard origin/main
+          cp /tmp/data.db.new data.db
           git add data.db
           if git diff --cached --quiet; then
             echo "No changes."
           else
             git commit -m "chore: update analytics snapshot"
-            git pull --rebase origin main
             git push
           fi
