@@ -177,7 +177,7 @@ def main() -> None:
     try:
         daily_geo = fetch_daily_geo_metrics(start, end, channel_id)
     except Exception as e:
-        print(f"  daily geo metrics failed ({e.__class__.__name__}), skipping.")
+        print(f"  daily geo metrics failed ({e.__class__.__name__}: {e}), skipping.")
         daily_geo = []
 
     with get_conn() as conn:
