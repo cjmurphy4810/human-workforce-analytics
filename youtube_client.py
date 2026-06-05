@@ -295,55 +295,35 @@ def fetch_channel_playlists(channel_id: str | None = None) -> list[dict]:
 def fetch_playlist_period_metrics(start: date, end: date, channel_id: str | None = None) -> list[dict]:
     """Fetch aggregate metrics per playlist for the date range.
 
-    Uses isCurated==1 filter which scopes all metrics to playlist-initiated views.
-    subscribers_gained may be unavailable on some channels; falls back to 0 per row.
+    When dimensions=playlist, the Analytics API only supports views and
+    estimatedMinutesWatched. Playlist-session metrics (playlistStarts etc.)
+    are only available as channel-wide aggregates and cannot be split by
+    playlist ID. isCurated==1 also requires channel==MINE, not a specific ID.
     """
     yt = analytics_service()
-    ids = f"channel=={channel_id}" if channel_id else "channel==MINE"
-
-    def _query(metrics: str) -> list:
-        resp = yt.reports().query(
-            ids=ids,
-            startDate=start.isoformat(),
-            endDate=end.isoformat(),
-            metrics=metrics,
-            dimensions="playlist",
-            filters="isCurated==1",
-            maxResults=200,
-            sort="-views",
-        ).execute()
-        return resp.get("rows", [])
-
-    try:
-        rows = _query("views,estimatedMinutesWatched,playlistStarts,viewsPerPlaylistStart,averageTimeInPlaylist,subscribersGained")
-        return [
-            {
-                "metric_date": end.isoformat(),
-                "playlist_id": r[0],
-                "views": int(r[1]),
-                "estimated_minutes_watched": float(r[2]),
-                "playlist_starts": int(r[3]),
-                "views_per_playlist_start": float(r[4]),
-                "average_time_in_playlist": float(r[5]),
-                "subscribers_gained": int(r[6]),
-            }
-            for r in rows
-        ]
-    except Exception:
-        rows = _query("views,estimatedMinutesWatched,playlistStarts,viewsPerPlaylistStart,averageTimeInPlaylist")
-        return [
-            {
-                "metric_date": end.isoformat(),
-                "playlist_id": r[0],
-                "views": int(r[1]),
-                "estimated_minutes_watched": float(r[2]),
-                "playlist_starts": int(r[3]),
-                "views_per_playlist_start": float(r[4]),
-                "average_time_in_playlist": float(r[5]),
-                "subscribers_gained": 0,
-            }
-            for r in rows
-        ]
+    resp = yt.reports().query(
+        ids="channel==MINE",
+        startDate=start.isoformat(),
+        endDate=end.isoformat(),
+        metrics="views,estimatedMinutesWatched",
+        dimensions="playlist",
+        filters="isCurated==1",
+        maxResults=200,
+    ).execute()
+    rows = resp.get("rows", [])
+    return [
+        {
+            "metric_date": end.isoformat(),
+            "playlist_id": r[0],
+            "views": int(r[1]),
+            "estimated_minutes_watched": float(r[2]),
+            "playlist_starts": 0,
+            "views_per_playlist_start": 0.0,
+            "average_time_in_playlist": 0.0,
+            "subscribers_gained": 0,
+        }
+        for r in rows
+    ]
 
 
 def parse_iso8601_duration(duration: str) -> int:

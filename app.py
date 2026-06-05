@@ -288,14 +288,10 @@ else:
     total_starts = int(pl["playlist_starts"].sum())
     total_subs = int(pl["subscribers_gained"].sum())
 
-    pm1, pm2, pm3, pm4 = st.columns(4)
+    pm1, pm2, pm3 = st.columns(3)
     pm1.metric("Playlist Views (90d)", f"{total_views:,}")
     pm2.metric("Playlist Hours (90d)", f"{total_hours:,.1f}")
-    pm3.metric("Playlist Starts (90d)", f"{total_starts:,}")
-    if total_subs > 0:
-        pm4.metric("Subscribers via Playlists (90d)", f"{total_subs:,}")
-    else:
-        pm4.metric("Subscribers via Playlists", "N/A", help="Not reported by YouTube Analytics for this channel.")
+    pm3.metric("Playlists", f"{len(pl):,}")
 
     pc1, pc2 = st.columns(2)
     with pc1:
@@ -321,21 +317,15 @@ else:
         fig.update_yaxes(autorange="reversed")
         st.plotly_chart(fig, use_container_width=True)
 
-    display_cols = ["title", "item_count", "views", "hours_watched",
-                    "playlist_starts", "views_per_playlist_start", "average_time_in_playlist"]
+    display_cols = ["title", "item_count", "views", "hours_watched"]
     rename_map = {
         "title": "Playlist",
         "item_count": "Videos",
         "views": "Views",
         "hours_watched": "Hours Watched",
-        "playlist_starts": "Starts",
-        "views_per_playlist_start": "Views / Start",
-        "average_time_in_playlist": "Avg Time (min)",
     }
     display_df = pl[display_cols].rename(columns=rename_map)
     display_df["Hours Watched"] = display_df["Hours Watched"].round(1)
-    display_df["Views / Start"] = display_df["Views / Start"].round(2)
-    display_df["Avg Time (min)"] = display_df["Avg Time (min)"].round(1)
     st.dataframe(display_df, use_container_width=True, hide_index=True)
     st.caption(f"Snapshot: {latest_pm_date} · covers the preceding 90 days")
 
