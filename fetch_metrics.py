@@ -16,9 +16,11 @@ from ai_client import classify_video_themes, fetch_news_headlines, rank_videos_b
 from db import get_conn, init_db
 from youtube_client import (
     fetch_all_video_ids,
+    fetch_channel_playlists,
     fetch_channel_stats,
     fetch_daily_channel_metrics,
     fetch_daily_geo_metrics,
+    fetch_playlist_period_metrics,
     fetch_retention_curve,
     fetch_video_details,
     fetch_video_period_metrics,
@@ -180,6 +182,22 @@ def main() -> None:
         print(f"  daily geo metrics failed ({e.__class__.__name__}: {e}), skipping.")
         daily_geo = []
 
+    print("Fetching channel playlists...")
+    try:
+        playlists = fetch_channel_playlists(channel_id)
+        print(f"Found {len(playlists)} playlists.")
+    except Exception as e:
+        print(f"  playlist fetch failed ({e.__class__.__name__}: {e}), skipping.")
+        playlists = []
+
+    print(f"Fetching playlist metrics {start} -> {end}...")
+    try:
+        playlist_metrics = fetch_playlist_period_metrics(start, end, channel_id)
+        print(f"Fetched metrics for {len(playlist_metrics)} playlists.")
+    except Exception as e:
+        print(f"  playlist metrics failed ({e.__class__.__name__}: {e}), skipping.")
+        playlist_metrics = []
+
     with get_conn() as conn:
         conn.execute(
             "INSERT INTO channel_snapshots(captured_at, channel_id, subscriber_count, view_count, video_count) "
@@ -226,6 +244,33 @@ def main() -> None:
                 "likes=excluded.likes, subscribers_gained=excluded.subscribers_gained",
                 (d["metric_date"], d["video_id"], d["views"], d["estimated_minutes_watched"],
                  d["average_view_duration"], d["likes"], d["subscribers_gained"]),
+            )
+
+        for p in playlists:
+            conn.execute(
+                "INSERT INTO playlists(playlist_id, title, description, published_at, item_count, thumbnail_url) "
+                "VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(playlist_id) DO UPDATE SET title=excluded.title, "
+                "description=excluded.description, item_count=excluded.item_count, "
+                "thumbnail_url=excluded.thumbnail_url",
+                (p["playlist_id"], p["title"], p["description"], p["published_at"],
+                 p["item_count"], p["thumbnail_url"]),
+            )
+
+        for pm in playlist_metrics:
+            conn.execute(
+                "INSERT INTO playlist_metrics(metric_date, playlist_id, views, estimated_minutes_watched, "
+                "playlist_starts, views_per_playlist_start, average_time_in_playlist, subscribers_gained) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(metric_date, playlist_id) DO UPDATE SET views=excluded.views, "
+                "estimated_minutes_watched=excluded.estimated_minutes_watched, "
+                "playlist_starts=excluded.playlist_starts, "
+                "views_per_playlist_start=excluded.views_per_playlist_start, "
+                "average_time_in_playlist=excluded.average_time_in_playlist, "
+                "subscribers_gained=excluded.subscribers_gained",
+                (pm["metric_date"], pm["playlist_id"], pm["views"], pm["estimated_minutes_watched"],
+                 pm["playlist_starts"], pm["views_per_playlist_start"],
+                 pm["average_time_in_playlist"], pm["subscribers_gained"]),
             )
 
     try:

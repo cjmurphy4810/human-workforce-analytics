@@ -119,6 +119,14 @@ daily_geo = load(
     "SELECT metric_date, country_code, views, subscribers_gained, likes "
     "FROM daily_geo_metrics ORDER BY metric_date"
 )
+playlists_df = load(
+    "SELECT playlist_id, title, item_count FROM playlists"
+)
+playlist_metrics_df = load(
+    "SELECT metric_date, playlist_id, views, estimated_minutes_watched, "
+    "playlist_starts, views_per_playlist_start, average_time_in_playlist, subscribers_gained "
+    "FROM playlist_metrics ORDER BY metric_date"
+)
 
 if channel_snapshots.empty:
     st.title("🎙️ Human Workforce Analytics")
@@ -257,6 +265,79 @@ if not video_snapshots.empty:
         use_container_width=True,
         hide_index=True,
     )
+
+
+# --- Playlists ---
+
+st.subheader("Playlists")
+st.caption(
+    "Statistics for manually curated playlists. Metrics cover the last 90 days of playlist-initiated views."
+)
+
+if playlist_metrics_df.empty or playlists_df.empty:
+    st.info("No playlist data yet. Run `python fetch_metrics.py` to populate.")
+else:
+    latest_pm_date = playlist_metrics_df["metric_date"].max()
+    latest_pm = playlist_metrics_df[playlist_metrics_df["metric_date"] == latest_pm_date].copy()
+    pl = latest_pm.merge(playlists_df, on="playlist_id", how="left")
+    pl["hours_watched"] = pl["estimated_minutes_watched"] / 60
+    pl = pl.sort_values("views", ascending=False)
+
+    total_views = int(pl["views"].sum())
+    total_hours = pl["hours_watched"].sum()
+    total_starts = int(pl["playlist_starts"].sum())
+    total_subs = int(pl["subscribers_gained"].sum())
+
+    pm1, pm2, pm3, pm4 = st.columns(4)
+    pm1.metric("Playlist Views (90d)", f"{total_views:,}")
+    pm2.metric("Playlist Hours (90d)", f"{total_hours:,.1f}")
+    pm3.metric("Playlist Starts (90d)", f"{total_starts:,}")
+    if total_subs > 0:
+        pm4.metric("Subscribers via Playlists (90d)", f"{total_subs:,}")
+    else:
+        pm4.metric("Subscribers via Playlists", "N/A", help="Not reported by YouTube Analytics for this channel.")
+
+    pc1, pc2 = st.columns(2)
+    with pc1:
+        fig = px.bar(
+            pl.head(10),
+            x="views",
+            y="title",
+            orientation="h",
+            title="Views per Playlist (top 10)",
+            labels={"views": "Views", "title": ""},
+        )
+        fig.update_yaxes(autorange="reversed")
+        st.plotly_chart(fig, use_container_width=True)
+    with pc2:
+        fig = px.bar(
+            pl.head(10),
+            x="hours_watched",
+            y="title",
+            orientation="h",
+            title="Watch Hours per Playlist (top 10)",
+            labels={"hours_watched": "Hours", "title": ""},
+        )
+        fig.update_yaxes(autorange="reversed")
+        st.plotly_chart(fig, use_container_width=True)
+
+    display_cols = ["title", "item_count", "views", "hours_watched",
+                    "playlist_starts", "views_per_playlist_start", "average_time_in_playlist"]
+    rename_map = {
+        "title": "Playlist",
+        "item_count": "Videos",
+        "views": "Views",
+        "hours_watched": "Hours Watched",
+        "playlist_starts": "Starts",
+        "views_per_playlist_start": "Views / Start",
+        "average_time_in_playlist": "Avg Time (min)",
+    }
+    display_df = pl[display_cols].rename(columns=rename_map)
+    display_df["Hours Watched"] = display_df["Hours Watched"].round(1)
+    display_df["Views / Start"] = display_df["Views / Start"].round(2)
+    display_df["Avg Time (min)"] = display_df["Avg Time (min)"].round(1)
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
+    st.caption(f"Snapshot: {latest_pm_date} · covers the preceding 90 days")
 
 
 # --- Watch time ---
