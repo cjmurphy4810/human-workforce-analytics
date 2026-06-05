@@ -192,7 +192,8 @@ def main() -> None:
 
     print(f"Fetching playlist metrics {start} -> {end}...")
     try:
-        playlist_metrics = fetch_playlist_period_metrics(start, end, channel_id)
+        playlist_ids = [p["playlist_id"] for p in playlists]
+        playlist_metrics = fetch_playlist_period_metrics(playlist_ids, start, end)
         print(f"Fetched metrics for {len(playlist_metrics)} playlists.")
     except Exception as e:
         print(f"  playlist metrics failed ({e.__class__.__name__}: {e}), skipping.")
