@@ -112,7 +112,7 @@ def fetch_video_details(video_ids: list[str]) -> list[dict]:
                 "description": item["snippet"].get("description", ""),
                 "published_at": item["snippet"]["publishedAt"],
                 "thumbnail_url": item["snippet"]["thumbnails"].get("high", {}).get("url", ""),
-                "duration": item["contentDetails"]["duration"],
+                "duration": item["contentDetails"].get("duration", "PT0S"),
                 "view_count": int(item["statistics"].get("viewCount", 0)),
                 "like_count": int(item["statistics"].get("likeCount", 0)),
                 "comment_count": int(item["statistics"].get("commentCount", 0)),
