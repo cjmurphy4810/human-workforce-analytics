@@ -325,7 +325,7 @@ def fetch_playlist_period_metrics(playlist_ids: list[str], start: date, end: dat
                 "subscribers_gained": 0,
             })
         except Exception as e:
-            print(f"  skip playlist {playlist_id}: {e.__class__.__name__}")
+            print(f"  skip playlist {playlist_id}: {e.__class__.__name__}: {e}")
     return results
 
 
