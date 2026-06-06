@@ -297,12 +297,14 @@ else:
     pl = pl_agg.merge(playlists_df, on="playlist_id", how="right").fillna(0)
     pl = pl.sort_values("views", ascending=False)
 
-    total_views = int(pl["views"].sum())
-    total_hours = pl["hours_watched"].sum()
+    # Deduplicate for channel-wide totals — a video in N playlists should count once
+    unique_videos = pv.drop_duplicates("video_id")
+    total_views = int(unique_videos["view_count"].fillna(0).sum())
+    total_hours = unique_videos["hours_watched"].sum()
 
     pm1, pm2, pm3 = st.columns(3)
-    pm1.metric("Total Views (across playlists)", f"{total_views:,}")
-    pm2.metric("Total Watch Hours (across playlists)", f"{total_hours:,.1f}")
+    pm1.metric("Total Views (unique videos)", f"{total_views:,}")
+    pm2.metric("Watch Hours (unique videos, 90d)", f"{total_hours:,.1f}")
     pm3.metric("Playlists", f"{len(pl):,}")
 
     pc1, pc2 = st.columns(2)
