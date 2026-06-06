@@ -307,28 +307,46 @@ else:
     pm2.metric("Watch Hours (unique videos, 90d)", f"{total_hours:,.1f}")
     pm3.metric("Playlists", f"{len(pl):,}")
 
+    # Catch-all / operational playlists that dwarf the others — excluded by default
+    _DEFAULT_EXCLUDE = {"All Podcast Videos", "MultiLanguageTitleDescriptionVideo", "The Human Workforce Podcast Series"}
+    all_titles = pl["title"].tolist()
+    default_selection = [t for t in all_titles if t not in _DEFAULT_EXCLUDE]
+
+    selected = st.multiselect(
+        "Show playlists",
+        options=all_titles,
+        default=default_selection,
+        key="playlist_filter",
+    )
+
+    pl_filtered = pl[pl["title"].isin(selected)] if selected else pl
+
     pc1, pc2 = st.columns(2)
     with pc1:
         fig = px.bar(
-            pl.head(10),
+            pl_filtered,
             x="views",
             y="title",
             orientation="h",
-            title="Views per Playlist (top 10)",
+            title="Views per Playlist",
             labels={"views": "Views", "title": ""},
+            height=max(300, len(pl_filtered) * 36),
         )
-        fig.update_yaxes(autorange="reversed")
+        fig.update_yaxes(autorange="reversed", tickfont=dict(size=11))
+        fig.update_layout(margin=dict(l=0))
         st.plotly_chart(fig, use_container_width=True)
     with pc2:
         fig = px.bar(
-            pl.head(10),
+            pl_filtered,
             x="hours_watched",
             y="title",
             orientation="h",
-            title="Watch Hours per Playlist (top 10)",
+            title="Watch Hours per Playlist (90d)",
             labels={"hours_watched": "Hours", "title": ""},
+            height=max(300, len(pl_filtered) * 36),
         )
-        fig.update_yaxes(autorange="reversed")
+        fig.update_yaxes(autorange="reversed", tickfont=dict(size=11))
+        fig.update_layout(margin=dict(l=0))
         st.plotly_chart(fig, use_container_width=True)
 
     display_cols = ["title", "item_count", "views", "hours_watched", "likes"]
@@ -339,7 +357,7 @@ else:
         "hours_watched": "Hours Watched",
         "likes": "Likes",
     }
-    display_df = pl[display_cols].rename(columns=rename_map)
+    display_df = pl_filtered[display_cols].rename(columns=rename_map)
     display_df["Hours Watched"] = display_df["Hours Watched"].round(1)
     display_df["Views"] = display_df["Views"].astype(int)
     display_df["Likes"] = display_df["Likes"].astype(int)
