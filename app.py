@@ -122,10 +122,8 @@ daily_geo = load(
 playlists_df = load(
     "SELECT playlist_id, title, item_count FROM playlists"
 )
-playlist_metrics_df = load(
-    "SELECT metric_date, playlist_id, views, estimated_minutes_watched, "
-    "playlist_starts, views_per_playlist_start, average_time_in_playlist, subscribers_gained "
-    "FROM playlist_metrics ORDER BY metric_date"
+playlist_videos_df = load(
+    "SELECT playlist_id, video_id FROM playlist_videos"
 )
 
 if channel_snapshots.empty:
@@ -270,29 +268,42 @@ if not video_snapshots.empty:
 # --- Playlists ---
 
 st.subheader("Playlists")
-st.caption(
-    "Statistics for manually curated playlists. Metrics cover the last 90 days of playlist-initiated views."
-)
+st.caption("Cumulative performance of the videos contained in each playlist.")
 
-if playlist_metrics_df.empty or playlists_df.empty:
+if playlist_videos_df.empty or playlists_df.empty:
     st.info("No playlist data yet. Run `python fetch_metrics.py` to populate.")
 else:
-    latest_pm_date = playlist_metrics_df["metric_date"].max()
-    latest_pm = playlist_metrics_df[playlist_metrics_df["metric_date"] == latest_pm_date].copy()
-    pl = latest_pm.merge(playlists_df, on="playlist_id", how="left")
-    pl["hours_watched"] = pl["estimated_minutes_watched"] / 60
+    # Latest snapshot per video
+    latest_vs = (
+        video_snapshots.sort_values("captured_at")
+        .groupby("video_id", as_index=False).last()
+    )[["video_id", "view_count", "like_count"]]
+
+    # Latest 90-day watch minutes per video
+    latest_dvm = (
+        daily_videos.sort_values("metric_date")
+        .groupby("video_id", as_index=False).last()
+    )[["video_id", "estimated_minutes_watched"]]
+
+    pv = playlist_videos_df.merge(latest_vs, on="video_id", how="left")
+    pv = pv.merge(latest_dvm, on="video_id", how="left")
+    pv["hours_watched"] = pv["estimated_minutes_watched"].fillna(0) / 60
+
+    pl_agg = pv.groupby("playlist_id", as_index=False).agg(
+        views=("view_count", "sum"),
+        hours_watched=("hours_watched", "sum"),
+        likes=("like_count", "sum"),
+    )
+    pl = pl_agg.merge(playlists_df, on="playlist_id", how="right").fillna(0)
     pl = pl.sort_values("views", ascending=False)
 
     total_views = int(pl["views"].sum())
     total_hours = pl["hours_watched"].sum()
-    total_starts = int(pl["playlist_starts"].sum())
-    total_subs = int(pl["subscribers_gained"].sum())
 
-    pm1, pm2, pm3, pm4 = st.columns(4)
-    pm1.metric("Playlist Views (90d)", f"{total_views:,}")
-    pm2.metric("Playlist Hours (90d)", f"{total_hours:,.1f}")
-    pm3.metric("Playlist Starts (90d)", f"{total_starts:,}")
-    pm4.metric("Playlists", f"{len(pl):,}")
+    pm1, pm2, pm3 = st.columns(3)
+    pm1.metric("Total Views (across playlists)", f"{total_views:,}")
+    pm2.metric("Total Watch Hours (across playlists)", f"{total_hours:,.1f}")
+    pm3.metric("Playlists", f"{len(pl):,}")
 
     pc1, pc2 = st.columns(2)
     with pc1:
@@ -318,23 +329,20 @@ else:
         fig.update_yaxes(autorange="reversed")
         st.plotly_chart(fig, use_container_width=True)
 
-    display_cols = ["title", "item_count", "views", "hours_watched",
-                    "playlist_starts", "views_per_playlist_start", "average_time_in_playlist"]
+    display_cols = ["title", "item_count", "views", "hours_watched", "likes"]
     rename_map = {
         "title": "Playlist",
         "item_count": "Videos",
         "views": "Views",
         "hours_watched": "Hours Watched",
-        "playlist_starts": "Starts",
-        "views_per_playlist_start": "Views / Start",
-        "average_time_in_playlist": "Avg Time (min)",
+        "likes": "Likes",
     }
     display_df = pl[display_cols].rename(columns=rename_map)
     display_df["Hours Watched"] = display_df["Hours Watched"].round(1)
-    display_df["Views / Start"] = display_df["Views / Start"].round(2)
-    display_df["Avg Time (min)"] = display_df["Avg Time (min)"].round(1)
+    display_df["Views"] = display_df["Views"].astype(int)
+    display_df["Likes"] = display_df["Likes"].astype(int)
     st.dataframe(display_df, use_container_width=True, hide_index=True)
-    st.caption(f"Snapshot: {latest_pm_date} · covers the preceding 90 days")
+    st.caption("Views and hours reflect cumulative totals of videos in each playlist. A video in multiple playlists is counted in each.")
 
 
 # --- Watch time ---

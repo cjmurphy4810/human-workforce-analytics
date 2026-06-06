@@ -99,22 +99,12 @@ CREATE TABLE IF NOT EXISTS playlists (
     thumbnail_url TEXT
 );
 
-CREATE TABLE IF NOT EXISTS playlist_metrics (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    metric_date TEXT NOT NULL,
+CREATE TABLE IF NOT EXISTS playlist_videos (
     playlist_id TEXT NOT NULL,
-    views INTEGER,
-    estimated_minutes_watched REAL,
-    playlist_starts INTEGER,
-    views_per_playlist_start REAL,
-    average_time_in_playlist REAL,
-    subscribers_gained INTEGER,
-    UNIQUE(metric_date, playlist_id),
-    FOREIGN KEY (playlist_id) REFERENCES playlists(playlist_id)
+    video_id TEXT NOT NULL,
+    position INTEGER,
+    PRIMARY KEY (playlist_id, video_id)
 );
-
-CREATE INDEX IF NOT EXISTS idx_playlist_metrics_date
-    ON playlist_metrics(metric_date);
 """
 
 

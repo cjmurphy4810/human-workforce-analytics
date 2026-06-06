@@ -20,7 +20,7 @@ from youtube_client import (
     fetch_channel_stats,
     fetch_daily_channel_metrics,
     fetch_daily_geo_metrics,
-    fetch_playlist_period_metrics,
+    fetch_playlist_video_ids,
     fetch_retention_curve,
     fetch_video_details,
     fetch_video_period_metrics,
@@ -190,14 +190,20 @@ def main() -> None:
         print(f"  playlist fetch failed ({e.__class__.__name__}: {e}), skipping.")
         playlists = []
 
-    print(f"Fetching playlist metrics {start} -> {end}...")
-    try:
-        playlist_ids = [p["playlist_id"] for p in playlists]
-        playlist_metrics = fetch_playlist_period_metrics(playlist_ids, start, end)
-        print(f"Fetched metrics for {len(playlist_metrics)} playlists.")
-    except Exception as e:
-        print(f"  playlist metrics failed ({e.__class__.__name__}: {e}), skipping.")
-        playlist_metrics = []
+    print("Fetching playlist video memberships...")
+    playlist_video_memberships = []
+    for p in playlists:
+        try:
+            vids = fetch_playlist_video_ids(p["playlist_id"])
+            for pos, vid in enumerate(vids):
+                playlist_video_memberships.append({
+                    "playlist_id": p["playlist_id"],
+                    "video_id": vid,
+                    "position": pos,
+                })
+        except Exception as e:
+            print(f"  skip playlist items {p['playlist_id']}: {e.__class__.__name__}")
+    print(f"Fetched {len(playlist_video_memberships)} playlist-video memberships.")
 
     with get_conn() as conn:
         conn.execute(
@@ -258,20 +264,12 @@ def main() -> None:
                  p["item_count"], p["thumbnail_url"]),
             )
 
-        for pm in playlist_metrics:
+        for m in playlist_video_memberships:
             conn.execute(
-                "INSERT INTO playlist_metrics(metric_date, playlist_id, views, estimated_minutes_watched, "
-                "playlist_starts, views_per_playlist_start, average_time_in_playlist, subscribers_gained) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(metric_date, playlist_id) DO UPDATE SET views=excluded.views, "
-                "estimated_minutes_watched=excluded.estimated_minutes_watched, "
-                "playlist_starts=excluded.playlist_starts, "
-                "views_per_playlist_start=excluded.views_per_playlist_start, "
-                "average_time_in_playlist=excluded.average_time_in_playlist, "
-                "subscribers_gained=excluded.subscribers_gained",
-                (pm["metric_date"], pm["playlist_id"], pm["views"], pm["estimated_minutes_watched"],
-                 pm["playlist_starts"], pm["views_per_playlist_start"],
-                 pm["average_time_in_playlist"], pm["subscribers_gained"]),
+                "INSERT INTO playlist_videos(playlist_id, video_id, position) "
+                "VALUES (?, ?, ?) "
+                "ON CONFLICT(playlist_id, video_id) DO UPDATE SET position=excluded.position",
+                (m["playlist_id"], m["video_id"], m["position"]),
             )
 
     try:
