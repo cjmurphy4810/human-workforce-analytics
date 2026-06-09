@@ -224,23 +224,31 @@ if not daily_geo.empty:
     geo = daily_geo.copy()
     geo["country"] = geo["country_code"].map(lambda c: COUNTRY_NAMES.get(c, c))
     latest_geo_date = geo["metric_date"].max()
-    geo = geo[geo["metric_date"] == latest_geo_date].sort_values("views", ascending=False).head(10)
+    geo = geo[geo["metric_date"] == latest_geo_date].sort_values("views", ascending=False)
     if geo.empty:
         st.info("No geographic data yet.")
     else:
+        all_countries = geo["country"].tolist()
+        selected_countries = st.multiselect(
+            "Show regions",
+            options=all_countries,
+            default=all_countries,
+            key="geo_filter",
+        )
+        geo_filtered = geo[geo["country"].isin(selected_countries)] if selected_countries else geo
         fig = make_subplots(
             rows=1, cols=3,
             subplot_titles=("Views", "Subscribers Gained", "Likes"),
             shared_yaxes=True,
         )
         colors = px.colors.qualitative.Plotly
-        fig.add_bar(x=geo["views"], y=geo["country"], orientation="h",
+        fig.add_bar(x=geo_filtered["views"], y=geo_filtered["country"], orientation="h",
                     name="Views", marker_color=colors[0], row=1, col=1)
-        fig.add_bar(x=geo["subscribers_gained"], y=geo["country"], orientation="h",
+        fig.add_bar(x=geo_filtered["subscribers_gained"], y=geo_filtered["country"], orientation="h",
                     name="Subscribers", marker_color=colors[1], row=1, col=2)
-        fig.add_bar(x=geo["likes"], y=geo["country"], orientation="h",
+        fig.add_bar(x=geo_filtered["likes"], y=geo_filtered["country"], orientation="h",
                     name="Likes", marker_color=colors[2], row=1, col=3)
-        fig.update_layout(height=420, showlegend=False)
+        fig.update_layout(height=max(320, len(geo_filtered) * 36), showlegend=False)
         fig.update_yaxes(autorange="reversed")
         st.plotly_chart(fig, use_container_width=True)
         st.caption(f"Snapshot: {latest_geo_date} · covers the preceding 90 days")
