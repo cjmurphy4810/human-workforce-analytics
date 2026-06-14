@@ -105,6 +105,16 @@ CREATE TABLE IF NOT EXISTS playlist_videos (
     position INTEGER,
     PRIMARY KEY (playlist_id, video_id)
 );
+
+CREATE TABLE IF NOT EXISTS queue_recommendations (
+    video_id TEXT PRIMARY KEY,
+    first_recommended_at TEXT NOT NULL,
+    recommended_publish_date TEXT NOT NULL,
+    rank_at_recommendation INTEGER NOT NULL,
+    relevance_score REAL NOT NULL,
+    theme TEXT,
+    why_now TEXT
+);
 """
 
 

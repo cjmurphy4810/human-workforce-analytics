@@ -146,3 +146,37 @@ def test_daily_geo_metrics_primary_key_constraint():
                 except sqlite3.IntegrityError:
                     raised = True
                 assert raised
+
+
+def test_queue_recommendations_table_created():
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "test.db"
+        with patch("db.DB_PATH", db_path):
+            import db
+            db.init_db()
+            with sqlite3.connect(db_path) as conn:
+                cursor = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='queue_recommendations'"
+                )
+                assert cursor.fetchone() is not None
+
+
+def test_queue_recommendations_insert_or_ignore():
+    """Inserting the same video_id twice must result in exactly one row."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "test.db"
+        with patch("db.DB_PATH", db_path):
+            import db
+            db.init_db()
+            with sqlite3.connect(db_path) as conn:
+                for _ in range(2):
+                    conn.execute(
+                        "INSERT OR IGNORE INTO queue_recommendations "
+                        "(video_id, first_recommended_at, recommended_publish_date, "
+                        "rank_at_recommendation, relevance_score, theme, why_now) "
+                        "VALUES ('v1', '2026-06-14T10:00:00Z', '2026-06-15', 1, 8.5, 'AI', 'Timely.')"
+                    )
+                count = conn.execute(
+                    "SELECT COUNT(*) FROM queue_recommendations"
+                ).fetchone()[0]
+                assert count == 1
