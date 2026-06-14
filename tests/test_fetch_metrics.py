@@ -201,3 +201,82 @@ def test_write_geo_metrics_empty_list_is_noop():
                     "SELECT COUNT(*) FROM daily_geo_metrics"
                 ).fetchone()[0]
                 assert count == 0
+
+
+# --- write_queue_recommendations tests ---
+
+def test_write_queue_recommendations_inserts_first_occurrence():
+    """Happy path: one ranked video → one row in queue_recommendations."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "test.db"
+        with patch("db.DB_PATH", db_path):
+            import db as db_module
+            db_module.init_db()
+            from fetch_metrics import write_queue_recommendations
+            ranked = [
+                {
+                    "rank": 1,
+                    "video_id": "v1",
+                    "title": "AI Episode",
+                    "theme": "AI workforce",
+                    "relevance_score": 9.0,
+                    "why_now": "Major AI news today.",
+                }
+            ]
+            write_queue_recommendations(ranked, date(2026, 6, 14))
+            with sqlite3.connect(db_path) as conn:
+                row = conn.execute(
+                    "SELECT video_id, recommended_publish_date, rank_at_recommendation, relevance_score "
+                    "FROM queue_recommendations WHERE video_id = 'v1'"
+                ).fetchone()
+                assert row is not None
+                assert row[0] == "v1"
+                assert row[1] == "2026-06-15"   # cron_date + 1 day (rank=1)
+                assert row[2] == 1
+                assert row[3] == 9.0
+
+
+def test_write_queue_recommendations_ignores_duplicate_video_id():
+    """Calling write_queue_recommendations twice with the same video_id keeps only the first row."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "test.db"
+        with patch("db.DB_PATH", db_path):
+            import db as db_module
+            db_module.init_db()
+            from fetch_metrics import write_queue_recommendations
+            video = [{"rank": 1, "video_id": "v1", "title": "T", "theme": "AI",
+                      "relevance_score": 8.0, "why_now": "First time."}]
+            write_queue_recommendations(video, date(2026, 6, 14))
+            # Second call simulates next cron run with same video at different rank
+            video2 = [{"rank": 3, "video_id": "v1", "title": "T", "theme": "AI",
+                       "relevance_score": 5.0, "why_now": "Second time."}]
+            write_queue_recommendations(video2, date(2026, 6, 15))
+            with sqlite3.connect(db_path) as conn:
+                count = conn.execute(
+                    "SELECT COUNT(*) FROM queue_recommendations"
+                ).fetchone()[0]
+                assert count == 1
+                # First insertion's values must be preserved
+                row = conn.execute(
+                    "SELECT rank_at_recommendation, relevance_score, recommended_publish_date "
+                    "FROM queue_recommendations WHERE video_id = 'v1'"
+                ).fetchone()
+                assert row[0] == 1
+                assert row[1] == 8.0
+                assert row[2] == "2026-06-15"
+
+
+def test_write_queue_recommendations_noop_when_empty():
+    """Calling with an empty list writes nothing and does not error."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "test.db"
+        with patch("db.DB_PATH", db_path):
+            import db as db_module
+            db_module.init_db()
+            from fetch_metrics import write_queue_recommendations
+            write_queue_recommendations([], date(2026, 6, 14))
+            with sqlite3.connect(db_path) as conn:
+                count = conn.execute(
+                    "SELECT COUNT(*) FROM queue_recommendations"
+                ).fetchone()[0]
+                assert count == 0
