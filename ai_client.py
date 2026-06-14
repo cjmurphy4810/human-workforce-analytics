@@ -6,7 +6,7 @@ Pure functions — no DB, no Streamlit. All I/O is through parameters and return
 import json
 
 import anthropic
-from newsapi import NewsApiClient
+from newsapi.newsapi_client import NewsApiClient
 
 SYSTEM_PROMPT = (
     "You are an editorial assistant for 'The Human Workforce' podcast, which covers "

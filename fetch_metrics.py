@@ -121,6 +121,7 @@ def write_publishing_queue(videos: list[dict]) -> None:
             (analyzed_at, len(unpublished), len(headlines), json.dumps(result)),
         )
     print(f"  Publishing queue written: {len(ranked)} videos ranked against {len(headlines)} headlines.")
+    return result
 
 
 def write_queue_recommendations(ranked_videos: list[dict], cron_date: date) -> None:
@@ -308,10 +309,18 @@ def main() -> None:
     write_retention_rolling_windows([v["video_id"] for v in videos])
 
     print("Analyzing publishing queue...")
+    pq_result = None
     try:
-        write_publishing_queue(videos)
+        pq_result = write_publishing_queue(videos)
     except Exception as e:
         print(f"  Publishing queue failed ({e.__class__.__name__}), skipping.")
+
+    print("Writing queue recommendations...")
+    try:
+        ranked_for_recs = pq_result.get("ranked_videos", []) if pq_result else []
+        write_queue_recommendations(ranked_for_recs, date.today())
+    except Exception as e:
+        print(f"  Queue recommendations write failed ({e.__class__.__name__}), skipping.")
 
     print("Done.")
 
