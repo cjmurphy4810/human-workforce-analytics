@@ -74,7 +74,7 @@ def write_retention_rolling_windows(video_ids: list[str], today: date | None = N
                 )
 
 
-def write_publishing_queue(videos: list[dict]) -> None:
+def write_publishing_queue(videos: list[dict]) -> dict | None:
     """Classify unpublished video themes, rank by news relevance, persist to DB."""
     unpublished = [v for v in videos if v.get("privacy_status") != "public"]
     if not unpublished:
