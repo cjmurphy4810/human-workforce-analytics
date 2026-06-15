@@ -651,8 +651,8 @@ else:
 
 st.subheader("News-Timed Release Impact")
 st.caption(
-    "Episodes that graduated from the Publishing Queue and went live within the "
-    "±72–96h recommended timing window. Shows whether publishing on time with "
+    "Episodes that graduated from the Publishing Queue and went live within 72h early "
+    "to 96h after the recommended date. Shows whether publishing on time with "
     "the news cycle drives stronger early performance."
 )
 

@@ -131,8 +131,8 @@ def write_queue_recommendations(ranked_videos: list[dict], cron_date: date) -> N
     first_recommended_at = datetime.now(timezone.utc).isoformat()
     with get_conn() as conn:
         for item in ranked_videos:
-            rank = item.get("rank", 0)
-            recommended_publish_date = (cron_date + timedelta(days=int(rank))).isoformat()
+            rank = int(item.get("rank") or 0)
+            recommended_publish_date = (cron_date + timedelta(days=rank)).isoformat()
             conn.execute(
                 "INSERT OR IGNORE INTO queue_recommendations "
                 "(video_id, first_recommended_at, recommended_publish_date, "
@@ -142,7 +142,7 @@ def write_queue_recommendations(ranked_videos: list[dict], cron_date: date) -> N
                     item.get("video_id"),
                     first_recommended_at,
                     recommended_publish_date,
-                    int(rank),
+                    rank,
                     float(item.get("relevance_score", 0)),
                     item.get("theme"),
                     item.get("why_now"),
