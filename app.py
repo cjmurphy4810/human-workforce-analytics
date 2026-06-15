@@ -780,14 +780,14 @@ else:
 
         fig_views.update_layout(
             title="Cumulative Views by Day Since Publication",
-            xaxis_title="Days Since Publication",
+            xaxis_title="Day Since Release (1 = launch day)",
             yaxis_title="Cumulative Views",
             height=380,
             showlegend=True,
         )
         fig_hours.update_layout(
             title="Cumulative Hours Watched by Day Since Publication",
-            xaxis_title="Days Since Publication",
+            xaxis_title="Day Since Release (1 = launch day)",
             yaxis_title="Cumulative Hours",
             height=380,
             showlegend=True,
@@ -801,7 +801,7 @@ else:
 
         # --- Retention comparison ---
         st.markdown("#### Retention Depth Comparison")
-        ret_cohort = cohort[cohort["retention_at_25"].notna()].copy()
+        ret_cohort = cohort[cohort["retention_at_25"].notna() & cohort["retention_at_75"].notna()].copy()
         if ret_cohort.empty:
             st.caption("Retention data not yet available for these episodes.")
         else:
