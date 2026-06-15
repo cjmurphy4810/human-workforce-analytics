@@ -667,7 +667,7 @@ else:
 
     # Compute timing delta in hours
     cohort["published_at_dt"] = pd.to_datetime(cohort["published_at"]).dt.tz_localize(None)
-    cohort["recommended_dt"] = pd.to_datetime(cohort["recommended_publish_date"])
+    cohort["recommended_dt"] = pd.to_datetime(cohort["recommended_publish_date"]).dt.tz_localize(None)
     cohort["timing_hours"] = (
         (cohort["published_at_dt"] - cohort["recommended_dt"]).dt.total_seconds() / 3600
     )
