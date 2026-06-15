@@ -125,6 +125,24 @@ playlists_df = load(
 playlist_videos_df = load(
     "SELECT playlist_id, video_id FROM playlist_videos"
 )
+queue_recommendations_df = load(
+    "SELECT qr.video_id, qr.first_recommended_at, qr.recommended_publish_date, "
+    "qr.rank_at_recommendation, qr.relevance_score, qr.theme, "
+    "v.title, v.published_at, "
+    "COUNT(dvm.metric_date) AS data_days "
+    "FROM queue_recommendations qr "
+    "JOIN videos v ON qr.video_id = v.video_id "
+    "LEFT JOIN daily_video_metrics dvm "
+    "  ON dvm.video_id = qr.video_id "
+    "  AND dvm.metric_date >= date(v.published_at) "
+    "WHERE v.published_at IS NOT NULL "
+    "GROUP BY qr.video_id "
+    "HAVING COUNT(dvm.metric_date) >= 3"
+)
+cohort_daily_metrics = load(
+    "SELECT metric_date, video_id, views, estimated_minutes_watched, subscribers_gained "
+    "FROM daily_video_metrics"
+)
 
 if channel_snapshots.empty:
     st.title("🎙️ Human Workforce Analytics")
@@ -628,3 +646,190 @@ else:
         with st.expander("News headlines used"):
             for h in headlines:
                 st.markdown(f"- **{h['title']}** — {h.get('source', '')}")
+
+# --- News-Timed Release Impact ---
+
+st.subheader("News-Timed Release Impact")
+st.caption(
+    "Episodes that graduated from the Publishing Queue and went live within the "
+    "±72–96h recommended timing window. Shows whether publishing on time with "
+    "the news cycle drives stronger early performance."
+)
+
+if queue_recommendations_df.empty:
+    st.info(
+        "No episodes have graduated from the queue within the timing window yet. "
+        "This section populates once a recommended episode goes live and accumulates "
+        "3 days of data."
+    )
+else:
+    cohort = queue_recommendations_df.copy()
+
+    # Compute timing delta in hours
+    cohort["published_at_dt"] = pd.to_datetime(cohort["published_at"]).dt.tz_localize(None)
+    cohort["recommended_dt"] = pd.to_datetime(cohort["recommended_publish_date"])
+    cohort["timing_hours"] = (
+        (cohort["published_at_dt"] - cohort["recommended_dt"]).dt.total_seconds() / 3600
+    )
+
+    # Apply timing window: [-72h, +96h]
+    cohort = cohort[
+        (cohort["timing_hours"] >= -72) & (cohort["timing_hours"] <= 96)
+    ].copy()
+
+    if cohort.empty:
+        st.info(
+            "No episodes have graduated from the queue within the timing window yet. "
+            "This section populates once a recommended episode goes live and accumulates "
+            "3 days of data."
+        )
+    else:
+        eligible_ids = cohort["video_id"].tolist()
+        cohort["days_live"] = (
+            (pd.Timestamp.utcnow().tz_localize(None) - cohort["published_at_dt"]).dt.days
+        )
+
+        # --- Aggregate totals from daily metrics ---
+        cm = cohort_daily_metrics[cohort_daily_metrics["video_id"].isin(eligible_ids)].copy()
+        pub_map = cohort.set_index("video_id")["published_at_dt"].to_dict()
+        cm["published_at_dt"] = cm["video_id"].map(pub_map)
+        cm["metric_date_dt"] = pd.to_datetime(cm["metric_date"]).dt.tz_localize(None)
+        cm["day_offset"] = (cm["metric_date_dt"] - cm["published_at_dt"]).dt.days + 1
+        cm = cm[cm["day_offset"] >= 1]
+
+        totals = cm.groupby("video_id").agg(
+            total_views=("views", "sum"),
+            total_hours=("estimated_minutes_watched", lambda x: x.sum() / 60),
+            total_subs=("subscribers_gained", "sum"),
+        ).reset_index()
+        cohort = cohort.merge(totals, on="video_id", how="left")
+
+        # --- Retention depth ---
+        ret = retention_buckets[retention_buckets["video_id"].isin(eligible_ids)].copy()
+        if not ret.empty:
+            ret["window_end"] = pd.to_datetime(ret["window_end"])
+            latest_ret = ret.sort_values("window_end").groupby("video_id").last().reset_index()[
+                ["video_id", "retention_at_25", "retention_at_75"]
+            ]
+            cohort = cohort.merge(latest_ret, on="video_id", how="left")
+        else:
+            cohort["retention_at_25"] = None
+            cohort["retention_at_75"] = None
+
+        # Sort by timing delta ascending (closest to recommended first)
+        cohort = cohort.sort_values("timing_hours")
+
+        # --- Timing delta color helper ---
+        def _timing_label(h: float) -> str:
+            sign = "+" if h >= 0 else ""
+            return f"{sign}{h:.0f}h"
+
+        def _timing_color(h: float) -> str:
+            if abs(h) <= 24:
+                return "🟢"
+            elif abs(h) <= 60:
+                return "🟡"
+            return "⚪"
+
+        # --- Scorecard table ---
+        st.markdown("#### Cohort Scorecard")
+        score_rows = []
+        for _, row in cohort.iterrows():
+            score_rows.append({
+                "Title": row["title"][:55] + "…" if len(str(row["title"])) > 55 else row["title"],
+                "Timing": f"{_timing_color(row['timing_hours'])} {_timing_label(row['timing_hours'])}",
+                "Days Live": int(row["days_live"]),
+                "Views": int(row.get("total_views", 0) or 0),
+                "Hours Watched": round(row.get("total_hours", 0) or 0, 1),
+                "Subs Gained": int(row.get("total_subs", 0) or 0),
+                "Kept 25%": f"{row['retention_at_25'] * 100:.1f}%" if pd.notna(row.get("retention_at_25")) else "—",
+                "Kept 75%": f"{row['retention_at_75'] * 100:.1f}%" if pd.notna(row.get("retention_at_75")) else "—",
+            })
+        st.dataframe(pd.DataFrame(score_rows), use_container_width=True, hide_index=True)
+        st.caption("🟢 ±24h of recommended date  🟡 24–60h  ⚪ 60–96h")
+
+        # --- Trajectory charts ---
+        st.markdown("#### Performance Trajectory (Days Since Publication)")
+
+        colors = px.colors.qualitative.Plotly
+        color_map = {vid: colors[i % len(colors)] for i, vid in enumerate(eligible_ids)}
+        title_map = cohort.set_index("video_id")["title"].apply(
+            lambda t: str(t)[:35] + "…" if len(str(t)) > 35 else str(t)
+        ).to_dict()
+
+        cm_sorted = cm.sort_values(["video_id", "day_offset"])
+        cm_sorted["cumulative_views"] = cm_sorted.groupby("video_id")["views"].cumsum()
+        cm_sorted["cumulative_hours"] = (
+            cm_sorted.groupby("video_id")["estimated_minutes_watched"].cumsum() / 60
+        )
+
+        fig_views = go.Figure()
+        fig_hours = go.Figure()
+        for vid in eligible_ids:
+            vm = cm_sorted[cm_sorted["video_id"] == vid]
+            label = title_map.get(vid, vid)
+            clr = color_map[vid]
+            fig_views.add_scatter(
+                x=vm["day_offset"], y=vm["cumulative_views"],
+                name=label, mode="lines+markers", line=dict(color=clr),
+            )
+            fig_hours.add_scatter(
+                x=vm["day_offset"], y=vm["cumulative_hours"],
+                name=label, mode="lines+markers", line=dict(color=clr),
+            )
+
+        fig_views.update_layout(
+            title="Cumulative Views by Day Since Publication",
+            xaxis_title="Days Since Publication",
+            yaxis_title="Cumulative Views",
+            height=380,
+            showlegend=True,
+        )
+        fig_hours.update_layout(
+            title="Cumulative Hours Watched by Day Since Publication",
+            xaxis_title="Days Since Publication",
+            yaxis_title="Cumulative Hours",
+            height=380,
+            showlegend=True,
+        )
+
+        tc1, tc2 = st.columns(2)
+        with tc1:
+            st.plotly_chart(fig_views, use_container_width=True)
+        with tc2:
+            st.plotly_chart(fig_hours, use_container_width=True)
+
+        # --- Retention comparison ---
+        st.markdown("#### Retention Depth Comparison")
+        ret_cohort = cohort[cohort["retention_at_25"].notna()].copy()
+        if ret_cohort.empty:
+            st.caption("Retention data not yet available for these episodes.")
+        else:
+            ret_cohort["label"] = ret_cohort["title"].apply(
+                lambda t: str(t)[:40] + "…" if len(str(t)) > 40 else str(t)
+            )
+            fig_ret = go.Figure()
+            fig_ret.add_bar(
+                x=ret_cohort["retention_at_25"] * 100,
+                y=ret_cohort["label"],
+                orientation="h",
+                name="Kept 25%",
+                marker_color="#4C78A8",
+            )
+            fig_ret.add_bar(
+                x=ret_cohort["retention_at_75"] * 100,
+                y=ret_cohort["label"],
+                orientation="h",
+                name="Kept 75%",
+                marker_color="#54A24B",
+            )
+            fig_ret.update_layout(
+                barmode="group",
+                title="Audience Retention at 25% and 75% of Video Length",
+                xaxis_title="% of viewers",
+                height=max(300, len(ret_cohort) * 60),
+                showlegend=True,
+            )
+            fig_ret.update_xaxes(range=[0, 100])
+            fig_ret.update_yaxes(autorange="reversed")
+            st.plotly_chart(fig_ret, use_container_width=True)
