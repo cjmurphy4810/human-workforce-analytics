@@ -44,6 +44,10 @@ class VideoPromotionMetrics:
     series: str = ""
 
     promotion_efficiency_score: float = 0.0
+    # "API_ACTUAL"  — promotion_watch_hours from insightTrafficSourceType=ADVERTISING
+    # "ESTIMATED"   — promotion_watch_hours from promotion_views × avg_view_duration / 3600
+    # "NONE"        — no promotion data available; qualifying hours equal total hours
+    data_source: str = "NONE"
 
 
 def make_metrics(
@@ -68,6 +72,7 @@ def make_metrics(
     playlist: str = "",
     series: str = "",
     promotion_duration_estimated: bool = False,
+    data_source: str = "NONE",
 ) -> VideoPromotionMetrics:
     """Factory that derives all computed fields from primary inputs."""
     organic_views = max(total_views - promotion_views, 0)
@@ -108,4 +113,5 @@ def make_metrics(
         language=language,
         playlist=playlist,
         series=series,
+        data_source=data_source,
     )

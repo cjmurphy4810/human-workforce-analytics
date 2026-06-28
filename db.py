@@ -115,6 +115,18 @@ CREATE TABLE IF NOT EXISTS queue_recommendations (
     theme TEXT,
     why_now TEXT
 );
+
+CREATE TABLE IF NOT EXISTS video_traffic_source_metrics (
+    metric_date              TEXT NOT NULL,
+    video_id                 TEXT NOT NULL,
+    traffic_source_type      TEXT NOT NULL,
+    views                    INTEGER,
+    estimated_minutes_watched REAL,
+    average_view_duration    REAL,
+    PRIMARY KEY (metric_date, video_id, traffic_source_type)
+);
+CREATE INDEX IF NOT EXISTS idx_vtsm_video_date
+    ON video_traffic_source_metrics(video_id, metric_date);
 """
 
 

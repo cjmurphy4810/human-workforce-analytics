@@ -235,6 +235,38 @@ def fetch_video_views_in_window(video_id: str, start: date, end: date) -> int:
     return int(rows[0][0])
 
 
+def fetch_video_traffic_source_metrics(start: date, end: date, channel_id: str | None = None) -> list[dict]:
+    """Fetch per-video watch time broken down by insightTrafficSourceType.
+
+    ADVERTISING rows are the promotion-generated watch time that does not count
+    toward YouTube Partner Program qualifying hours.
+    Returns one row per (video, traffic_source_type) for the requested window.
+    """
+    yt = analytics_service()
+    ids = f"channel=={channel_id}" if channel_id else "channel==MINE"
+    resp = yt.reports().query(
+        ids=ids,
+        startDate=start.isoformat(),
+        endDate=end.isoformat(),
+        metrics="views,estimatedMinutesWatched,averageViewDuration",
+        dimensions="video,insightTrafficSourceType",
+        maxResults=500,
+        sort="-estimatedMinutesWatched",
+    ).execute()
+    rows = resp.get("rows", [])
+    return [
+        {
+            "metric_date": end.isoformat(),
+            "video_id": r[0],
+            "traffic_source_type": r[1],
+            "views": int(r[2]),
+            "estimated_minutes_watched": float(r[3]),
+            "average_view_duration": float(r[4]),
+        }
+        for r in rows
+    ]
+
+
 def fetch_daily_geo_metrics(start: date, end: date, channel_id: str | None = None) -> list[dict]:
     """Fetch aggregate views, subscribers_gained, and likes broken down by country.
 

@@ -24,6 +24,7 @@ from youtube_client import (
     fetch_retention_curve,
     fetch_video_details,
     fetch_video_period_metrics,
+    fetch_video_traffic_source_metrics,
     fetch_video_views_in_window,
     parse_iso8601_duration,
     resolve_channel_id,
@@ -210,6 +211,14 @@ def main() -> None:
         print(f"  daily geo metrics failed ({e.__class__.__name__}: {e}), skipping.")
         daily_geo = []
 
+    print(f"Fetching video traffic source metrics {start} -> {end}...")
+    try:
+        traffic_source = fetch_video_traffic_source_metrics(start, end, channel_id)
+        print(f"  {len(traffic_source)} traffic source rows.")
+    except Exception as e:
+        print(f"  traffic source metrics failed ({e.__class__.__name__}: {e}), skipping.")
+        traffic_source = []
+
     print("Fetching channel playlists...")
     try:
         playlists = fetch_channel_playlists(channel_id)
@@ -279,6 +288,20 @@ def main() -> None:
                 "likes=excluded.likes, subscribers_gained=excluded.subscribers_gained",
                 (d["metric_date"], d["video_id"], d["views"], d["estimated_minutes_watched"],
                  d["average_view_duration"], d["likes"], d["subscribers_gained"]),
+            )
+
+        for d in traffic_source:
+            conn.execute(
+                "INSERT INTO video_traffic_source_metrics("
+                "metric_date, video_id, traffic_source_type, "
+                "views, estimated_minutes_watched, average_view_duration) "
+                "VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(metric_date, video_id, traffic_source_type) DO UPDATE SET "
+                "views=excluded.views, "
+                "estimated_minutes_watched=excluded.estimated_minutes_watched, "
+                "average_view_duration=excluded.average_view_duration",
+                (d["metric_date"], d["video_id"], d["traffic_source_type"],
+                 d["views"], d["estimated_minutes_watched"], d["average_view_duration"]),
             )
 
         for p in playlists:

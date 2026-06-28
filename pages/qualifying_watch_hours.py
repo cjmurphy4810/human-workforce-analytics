@@ -176,7 +176,17 @@ def _db_query(db_path_str: str, sql: str) -> pd.DataFrame:
 
 
 def _build_real_metrics(db_path: Path) -> list[VideoPromotionMetrics]:
-    """Build VideoPromotionMetrics from real DB data. Promotion fields are zero until CSV is uploaded."""
+    """Build VideoPromotionMetrics from real DB data.
+
+    Promotion watch hours come from insightTrafficSourceType=ADVERTISING via
+    video_traffic_source_metrics (data_source='API_ACTUAL').
+
+    Fallback: if ADVERTISING data is unavailable for a video, promotion_watch_hours
+    is estimated as promotion_views × average_view_duration / 3600 (data_source='ESTIMATED').
+    Follow-on views are tracked separately and never counted as watch hours.
+
+    If no promotion data exists at all, data_source='NONE' and qualifying hours = total hours.
+    """
     vids = _db_query(str(db_path),
         "SELECT video_id, title, published_at, duration_seconds FROM videos")
     if vids.empty:
@@ -187,8 +197,7 @@ def _build_real_metrics(db_path: Path) -> list[VideoPromotionMetrics]:
     if not snap.empty:
         snap = snap.groupby("video_id", as_index=False).last()[["video_id", "view_count"]]
 
-    # daily_video_metrics stores the 90-day aggregate per video stamped to today's date.
-    # Take only the latest snapshot per video to avoid multiplying the same hours.
+    # Latest 90-day total per video (not a sum — each row is already a 90-day aggregate)
     dvm = _db_query(str(db_path),
         "SELECT d.video_id, "
         "d.estimated_minutes_watched/60.0 AS total_watch_hours, "
@@ -200,6 +209,22 @@ def _build_real_metrics(db_path: Path) -> list[VideoPromotionMetrics]:
         ") latest ON d.video_id = latest.video_id "
         "AND d.metric_date = latest.latest_date")
 
+    # ADVERTISING traffic source watch hours per video (API_ACTUAL)
+    adv = _db_query(str(db_path),
+        "SELECT d.video_id, "
+        "d.estimated_minutes_watched/60.0 AS advertising_watch_hours, "
+        "d.views AS advertising_views, "
+        "d.average_view_duration AS avg_advertising_view_duration "
+        "FROM video_traffic_source_metrics d "
+        "INNER JOIN ("
+        "  SELECT video_id, MAX(metric_date) AS latest_date "
+        "  FROM video_traffic_source_metrics "
+        "  WHERE traffic_source_type = 'ADVERTISING' "
+        "  GROUP BY video_id"
+        ") latest ON d.video_id = latest.video_id "
+        "AND d.metric_date = latest.latest_date "
+        "WHERE d.traffic_source_type = 'ADVERTISING'")
+
     df = vids.copy()
     if not snap.empty:
         df = df.merge(snap, on="video_id", how="left")
@@ -210,10 +235,18 @@ def _build_real_metrics(db_path: Path) -> list[VideoPromotionMetrics]:
     else:
         df["total_watch_hours"] = 0.0
         df["avg_view_duration"] = 0.0
+    if not adv.empty:
+        df = df.merge(adv, on="video_id", how="left")
+    else:
+        df["advertising_watch_hours"] = float("nan")
+        df["advertising_views"] = float("nan")
+        df["avg_advertising_view_duration"] = float("nan")
 
     df["view_count"] = df["view_count"].fillna(0).astype(int)
     df["total_watch_hours"] = df["total_watch_hours"].fillna(0.0)
     df["avg_view_duration"] = df["avg_view_duration"].fillna(0.0)
+
+    has_api_data = not adv.empty
 
     metrics: list[VideoPromotionMetrics] = []
     for _, row in df.iterrows():
@@ -223,21 +256,67 @@ def _build_real_metrics(db_path: Path) -> list[VideoPromotionMetrics]:
                 published = pd.to_datetime(row["published_at"]).to_pydatetime().replace(tzinfo=None)
             except Exception:
                 pass
+
+        total_wh = float(row["total_watch_hours"])
+        avg_dur = float(row.get("avg_view_duration") or 0)
+
+        if has_api_data and pd.notna(row.get("advertising_watch_hours")):
+            # API_ACTUAL: ADVERTISING minutes directly from insightTrafficSourceType
+            promo_views = int(row.get("advertising_views") or 0)
+            promo_wh_direct = float(row["advertising_watch_hours"])
+            avg_promo_dur = float(row.get("avg_advertising_view_duration") or avg_dur)
+            data_source = "API_ACTUAL"
+        elif has_api_data:
+            # Video had no ADVERTISING traffic in the period — truly zero promotion
+            promo_views = 0
+            promo_wh_direct = 0.0
+            avg_promo_dur = 0.0
+            data_source = "API_ACTUAL"
+        else:
+            # No traffic source data yet — will populate on next fetch
+            promo_views = 0
+            promo_wh_direct = 0.0
+            avg_promo_dur = 0.0
+            data_source = "NONE"
+
         metrics.append(make_metrics(
             video_id=str(row["video_id"]),
             title=str(row.get("title", "")),
             published=published,
             length_seconds=int(row.get("duration_seconds") or 0),
             total_views=int(row["view_count"]),
-            promotion_views=0,
-            total_watch_hours=float(row["total_watch_hours"]),
-            avg_promotion_view_duration_seconds=0.0,
+            promotion_views=promo_views,
+            total_watch_hours=total_wh,
+            avg_promotion_view_duration_seconds=avg_promo_dur,
             promotion_cost=0.0,
             subscribers=0,
             follow_on_views=0,
-            avg_view_duration_seconds=float(row.get("avg_view_duration") or 0),
+            avg_view_duration_seconds=avg_dur,
+            data_source=data_source,
+            # Pass pre-computed promo watch hours directly via the factory
         ))
-    return compute_efficiency_scores(metrics)
+
+    # Post-process: override promotion_watch_hours with API_ACTUAL values
+    # (make_metrics recomputes from avg_promotion_view_duration; we need exact API hours)
+    corrected: list[VideoPromotionMetrics] = []
+    for m, (_, row) in zip(metrics, df.iterrows()):
+        if m.data_source == "API_ACTUAL" and pd.notna(row.get("advertising_watch_hours")):
+            import dataclasses as _dc
+            adv_wh = float(row["advertising_watch_hours"])
+            organic_wh = max(m.total_watch_hours - adv_wh, 0.0)
+            promo_pct = (adv_wh / max(m.total_watch_hours, 1)) * 100
+            corrected.append(_dc.replace(
+                m,
+                promotion_watch_hours=adv_wh,
+                organic_watch_hours=organic_wh,
+                estimated_qualifying_hours=organic_wh,
+                promotion_percentage=promo_pct,
+                promotion_views=int(row.get("advertising_views") or 0),
+            ))
+        else:
+            corrected.append(m)
+
+    return compute_efficiency_scores(corrected)
 
 
 def _build_real_timeseries(db_path: Path) -> pd.DataFrame:
@@ -268,6 +347,28 @@ def _get_qualifying_hours_last_365(db_path: Path) -> float:
     if df.empty or pd.isna(df["hrs"].iloc[0]):
         return 0.0
     return float(df["hrs"].iloc[0])
+
+
+def _get_advertising_watch_hours(db_path: Path) -> tuple[float, bool]:
+    """Return (advertising_watch_hours, has_api_data).
+
+    Sums the latest ADVERTISING-source estimated_minutes_watched per video.
+    Returns (0.0, False) when video_traffic_source_metrics has no ADVERTISING rows.
+    """
+    df = _db_query(str(db_path),
+        "SELECT SUM(d.estimated_minutes_watched)/60.0 AS adv_hrs "
+        "FROM video_traffic_source_metrics d "
+        "INNER JOIN ("
+        "  SELECT video_id, MAX(metric_date) AS latest_date "
+        "  FROM video_traffic_source_metrics "
+        "  WHERE traffic_source_type = 'ADVERTISING' "
+        "  GROUP BY video_id"
+        ") latest ON d.video_id = latest.video_id "
+        "AND d.metric_date = latest.latest_date "
+        "WHERE d.traffic_source_type = 'ADVERTISING'")
+    if df.empty or pd.isna(df["adv_hrs"].iloc[0]):
+        return 0.0, False
+    return float(df["adv_hrs"].iloc[0]), True
 
 
 def _get_db_date_range(db_path: Path) -> tuple[Optional[str], Optional[str]]:
@@ -310,6 +411,7 @@ def _to_df(metrics: list[VideoPromotionMetrics]) -> pd.DataFrame:
                 int(m.total_watch_hours * 3600 / max(m.total_views, 1))
             ),
             "Efficiency Score": round(m.promotion_efficiency_score, 1),
+            "Data Source": m.data_source,
             "Status": m.status,
             "campaign": m.campaign,
             "playlist": m.playlist,
@@ -667,35 +769,77 @@ def render(db_path: Path) -> None:
 
     # --- YPP progress (live data only) ---
     if source_mode == "Live Data" and has_real_data:
-        qualifying_365 = _get_qualifying_hours_last_365(db_path)
+        total_365 = _get_qualifying_hours_last_365(db_path)
+        adv_hours, has_adv_data = _get_advertising_watch_hours(db_path)
         earliest, latest = _get_db_date_range(db_path)
+        est_qualifying = max(total_365 - adv_hours, 0.0) if has_adv_data else total_365
+
         st.subheader("YouTube Partner Program Progress")
-        ypp_col1, ypp_col2, ypp_col3 = st.columns(3)
-        ypp_col1.metric(
-            "Total Watch Hours (DB)",
-            f"{qualifying_365:,.0f} hrs",
-            delta=f"covers {earliest} → {latest}" if earliest else None,
-            delta_color="off",
-            help="Sum of daily_channel_metrics — includes Shorts watch time. "
-                 "YouTube's YPP meter counts only public long-form videos.",
-        )
-        ypp_col2.metric(
-            "YPP Watch Hours Threshold",
-            f"{_YPP_WATCH_HOURS_THRESHOLD:,} hrs",
-            help="YouTube Partner Program requires 3,000 valid public watch hours in the last 365 days.",
-        )
-        ypp_col3.metric(
-            "Per YouTube Studio",
-            "Check Earn tab",
-            help="YouTube Studio → Earn shows the exact 'valid public watch hours' excluding Shorts. "
-                 "Our DB includes Shorts so the numbers differ.",
-        )
-        st.progress(min(qualifying_365 / _YPP_WATCH_HOURS_THRESHOLD, 1.0))
-        st.caption(
-            "⚠ This total **includes Shorts** watch time. "
-            "For the exact YPP-eligible count, check **YouTube Studio → Earn**. "
-            "Upload promotion data to see how much of these hours are at risk of being non-qualifying."
-        )
+
+        if has_adv_data:
+            ypp_col1, ypp_col2, ypp_col3, ypp_col4 = st.columns(4)
+            ypp_col1.metric(
+                "Total Watch Hours",
+                f"{total_365:,.0f} hrs",
+                delta=f"{earliest} → {latest}" if earliest else None,
+                delta_color="off",
+                help="Sum of daily_channel_metrics — includes Shorts. "
+                     "YouTube's YPP meter counts only public long-form videos.",
+            )
+            ypp_col2.metric(
+                "Promotion (ADVERTISING)",
+                f"−{adv_hours:,.0f} hrs",
+                delta="API_ACTUAL",
+                delta_color="off",
+                help="Sum of insightTrafficSourceType=ADVERTISING minutes watched / 60 "
+                     "across all videos (latest fetch). These hours do not count toward YPP.",
+            )
+            ypp_col3.metric(
+                "Est. Qualifying Hours",
+                f"{est_qualifying:,.0f} hrs",
+                help="Total watch hours minus ADVERTISING traffic source watch hours. "
+                     "Still includes Shorts — check YouTube Studio → Earn for the exact YPP count.",
+            )
+            ypp_col4.metric(
+                "YPP Threshold",
+                f"{_YPP_WATCH_HOURS_THRESHOLD:,} hrs",
+                help="YouTube Partner Program requires 3,000 valid public watch hours in the last 365 days.",
+            )
+            st.progress(min(est_qualifying / _YPP_WATCH_HOURS_THRESHOLD, 1.0))
+            st.caption(
+                f"Est. qualifying = {total_365:,.0f} total − {adv_hours:,.0f} ADVERTISING = **{est_qualifying:,.0f} hrs** (API_ACTUAL). "
+                "May still include Shorts watch time. Verify in **YouTube Studio → Earn**."
+            )
+        else:
+            ypp_col1, ypp_col2, ypp_col3 = st.columns(3)
+            ypp_col1.metric(
+                "Total Watch Hours (DB)",
+                f"{total_365:,.0f} hrs",
+                delta=f"covers {earliest} → {latest}" if earliest else None,
+                delta_color="off",
+                help="Sum of daily_channel_metrics — includes Shorts watch time.",
+            )
+            ypp_col2.metric(
+                "YPP Watch Hours Threshold",
+                f"{_YPP_WATCH_HOURS_THRESHOLD:,} hrs",
+                help="YouTube Partner Program requires 3,000 valid public watch hours in the last 365 days.",
+            )
+            ypp_col3.metric(
+                "Per YouTube Studio",
+                "Check Earn tab",
+                help="YouTube Studio → Earn shows the exact 'valid public watch hours' excluding Shorts.",
+            )
+            st.progress(min(total_365 / _YPP_WATCH_HOURS_THRESHOLD, 1.0))
+            st.info(
+                "ADVERTISING watch time data not yet available. "
+                "Run the fetch job to populate `video_traffic_source_metrics` — "
+                "qualifying hours will then be computed as **total − ADVERTISING**.",
+                icon="ℹ",
+            )
+            st.caption(
+                "⚠ This total **includes Shorts** watch time. "
+                "For the exact YPP-eligible count, check **YouTube Studio → Earn**."
+            )
 
     # --- Sidebar filters ---
     all_campaigns = sorted({m.campaign for m in base_metrics if m.campaign})
