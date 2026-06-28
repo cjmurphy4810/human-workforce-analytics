@@ -235,36 +235,51 @@ def fetch_video_views_in_window(video_id: str, start: date, end: date) -> int:
     return int(rows[0][0])
 
 
-def fetch_video_traffic_source_metrics(start: date, end: date, channel_id: str | None = None) -> list[dict]:
-    """Fetch per-video watch time broken down by insightTrafficSourceType.
+def fetch_video_traffic_source_metrics(
+    video_ids: list[str],
+    start: date,
+    end: date,
+    channel_id: str | None = None,
+) -> list[dict]:
+    """Fetch ADVERTISING watch time per video.
 
-    ADVERTISING rows are the promotion-generated watch time that does not count
-    toward YouTube Partner Program qualifying hours.
-    Returns one row per (video, traffic_source_type) for the requested window.
+    YouTube Analytics does not support dimensions=video,insightTrafficSourceType together.
+    Instead: use the Traffic Sources report (dimensions=insightTrafficSourceType) with a
+    per-video filter, making one API call per video.
+
+    Returns only ADVERTISING rows — these are the non-qualifying watch hours for YPP.
+    Videos with no ADVERTISING traffic in the period are simply omitted (zero promo hours).
     """
     yt = analytics_service()
     ids = f"channel=={channel_id}" if channel_id else "channel==MINE"
-    resp = yt.reports().query(
-        ids=ids,
-        startDate=start.isoformat(),
-        endDate=end.isoformat(),
-        metrics="views,estimatedMinutesWatched,averageViewDuration",
-        dimensions="video,insightTrafficSourceType",
-        maxResults=500,
-        sort="-estimatedMinutesWatched",
-    ).execute()
-    rows = resp.get("rows", [])
-    return [
-        {
-            "metric_date": end.isoformat(),
-            "video_id": r[0],
-            "traffic_source_type": r[1],
-            "views": int(r[2]),
-            "estimated_minutes_watched": float(r[3]),
-            "average_view_duration": float(r[4]),
-        }
-        for r in rows
-    ]
+    end_str = end.isoformat()
+    results = []
+
+    for video_id in video_ids:
+        try:
+            resp = yt.reports().query(
+                ids=ids,
+                startDate=start.isoformat(),
+                endDate=end_str,
+                metrics="views,estimatedMinutesWatched,averageViewDuration",
+                dimensions="insightTrafficSourceType",
+                filters=f"video=={video_id}",
+            ).execute()
+            for r in resp.get("rows", []):
+                if r[0] == "ADVERTISING":
+                    results.append({
+                        "metric_date": end_str,
+                        "video_id": video_id,
+                        "traffic_source_type": "ADVERTISING",
+                        "views": int(r[1]),
+                        "estimated_minutes_watched": float(r[2]),
+                        "average_view_duration": float(r[3]),
+                    })
+                    break
+        except Exception as e:
+            print(f"  skip {video_id} traffic: {e.__class__.__name__}")
+
+    return results
 
 
 def fetch_daily_geo_metrics(start: date, end: date, channel_id: str | None = None) -> list[dict]:

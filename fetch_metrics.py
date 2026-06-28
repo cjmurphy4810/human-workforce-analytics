@@ -211,10 +211,10 @@ def main() -> None:
         print(f"  daily geo metrics failed ({e.__class__.__name__}: {e}), skipping.")
         daily_geo = []
 
-    print(f"Fetching video traffic source metrics {start} -> {end}...")
+    print(f"Fetching ADVERTISING traffic source metrics for {len(video_ids)} videos {start} -> {end}...")
     try:
-        traffic_source = fetch_video_traffic_source_metrics(start, end, channel_id)
-        print(f"  {len(traffic_source)} traffic source rows.")
+        traffic_source = fetch_video_traffic_source_metrics(video_ids, start, end, channel_id)
+        print(f"  {len(traffic_source)} videos had ADVERTISING traffic.")
     except Exception as e:
         print(f"  traffic source metrics failed ({e.__class__.__name__}: {e}), skipping.")
         traffic_source = []
