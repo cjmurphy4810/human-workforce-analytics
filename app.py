@@ -40,6 +40,25 @@ def check_password() -> bool:
 if not check_password():
     st.stop()
 
+# --- Sidebar navigation ---
+with st.sidebar:
+    st.markdown("#### Analytics")
+    _NAV_OPTIONS = [
+        "Overview",
+        "Qualifying Watch Hours",
+    ]
+    _active_section = st.radio(
+        "nav",
+        _NAV_OPTIONS,
+        label_visibility="collapsed",
+        key="main_nav",
+    )
+
+if _active_section == "Qualifying Watch Hours":
+    from pages import qualifying_watch_hours as _qwh
+    _qwh.render(DB_PATH)
+    st.stop()
+
 
 @st.cache_data(ttl=300)
 def load(query: str) -> pd.DataFrame:
@@ -400,20 +419,65 @@ if not daily_channel.empty:
     hours["hours_watched"] = hours["estimated_minutes_watched"] / 60
     hours["cumulative_hours"] = hours["hours_watched"].cumsum()
 
-    fig = go.Figure()
-    fig.add_bar(x=hours["metric_date"], y=hours["hours_watched"],
-                name="Hours watched (per day)", marker_color="#4C78A8")
-    fig.add_scatter(x=hours["metric_date"], y=hours["cumulative_hours"],
-                    name="Cumulative hours", mode="lines+markers",
-                    yaxis="y2", line=dict(color="#F58518", width=3))
-    fig.update_layout(
-        title="Daily and Cumulative Watch Time",
-        xaxis_title="Date",
-        yaxis=dict(title="Hours watched per day"),
-        yaxis2=dict(title="Cumulative hours", overlaying="y", side="right"),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-    )
-    st.plotly_chart(fig, use_container_width=True)
+    # Qualifying hours = total hours minus estimated promotion watch hours.
+    # Ratio derived from per-video promotion data in the Qualifying Watch Hours section.
+    try:
+        from pages.qualifying_watch_hours import _build_demo_metrics as _qwh_demo
+        from analytics.qualifying_hours import compute_qualifying_hours as _compute_qh
+        _dm = _qwh_demo()
+        _report = _compute_qh(_dm)
+        _total_wh = sum(m.total_watch_hours for m in _dm)
+        _qual_ratio = _report.estimated_qualifying_hours / max(_total_wh, 1)
+        _promo_ratio = 1.0 - _qual_ratio
+    except Exception:
+        _qual_ratio = 1.0
+        _promo_ratio = 0.0
+
+    hours["qualifying_hours"] = hours["hours_watched"] * _qual_ratio
+    hours["promotion_hours"] = hours["hours_watched"] * _promo_ratio
+    hours["cumulative_qualifying"] = hours["qualifying_hours"].cumsum()
+
+    wt_col1, wt_col2 = st.columns(2)
+
+    with wt_col1:
+        fig = go.Figure()
+        fig.add_bar(x=hours["metric_date"], y=hours["hours_watched"],
+                    name="Hours watched (per day)", marker_color="#4C78A8")
+        fig.add_scatter(x=hours["metric_date"], y=hours["cumulative_hours"],
+                        name="Cumulative hours", mode="lines+markers",
+                        yaxis="y2", line=dict(color="#F58518", width=3))
+        fig.update_layout(
+            title="Daily and Cumulative Watch Time",
+            xaxis_title="Date",
+            yaxis=dict(title="Hours watched per day"),
+            yaxis2=dict(title="Cumulative hours", overlaying="y", side="right"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    with wt_col2:
+        fig2 = go.Figure()
+        fig2.add_bar(x=hours["metric_date"], y=hours["qualifying_hours"],
+                     name="Qualifying hours (per day)", marker_color="#54A24B")
+        fig2.add_bar(x=hours["metric_date"], y=hours["promotion_hours"],
+                     name="Est. promotion hours (per day)", marker_color="rgba(228,87,86,0.55)")
+        fig2.add_scatter(x=hours["metric_date"], y=hours["cumulative_qualifying"],
+                         name="Cumulative qualifying", mode="lines+markers",
+                         yaxis="y2", line=dict(color="#F58518", width=3))
+        fig2.update_layout(
+            title="Daily and Cumulative Qualifying Watch Time",
+            xaxis_title="Date",
+            barmode="stack",
+            yaxis=dict(title="Hours per day"),
+            yaxis2=dict(title="Cumulative qualifying hours", overlaying="y", side="right"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        st.plotly_chart(fig2, use_container_width=True)
+        st.caption(
+            f"Qualifying hours estimated using promotion data from the "
+            f"**Qualifying Watch Hours** section "
+            f"({_qual_ratio * 100:.0f}% organic / {_promo_ratio * 100:.0f}% promotion)."
+        )
 
 
 def render_retention(rb_full, toggle, today, video_id=None):
