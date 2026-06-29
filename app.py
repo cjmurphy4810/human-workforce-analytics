@@ -449,17 +449,12 @@ if not daily_channel.empty:
 
     hours["promotion_hours"] = hours["hours_watched"] * _promo_ratio
     hours["qualifying_hours"] = hours["hours_watched"] * _qual_ratio
-    hours["cumulative_qualifying"] = hours["qualifying_hours"].cumsum()
 
-    # Running totals across ALL available history (not just the selected window)
+    # All-time cumulative series — computed separately, no merge needed
     all_hours = daily_channel.sort_values("metric_date").copy()
-    all_hours["hours_watched_all"] = all_hours["estimated_minutes_watched"] / 60
-    all_hours["cumulative_hours_all"] = all_hours["hours_watched_all"].cumsum()
-    # Align the all-time cumulative onto the filtered window for the right y-axis
-    hours = hours.merge(
-        all_hours[["metric_date", "cumulative_hours_all"]],
-        on="metric_date", how="left"
-    )
+    all_hours["hours_all"] = all_hours["estimated_minutes_watched"] / 60
+    all_hours["cumulative_all"] = all_hours["hours_all"].cumsum()
+    all_hours["cumulative_qualifying_all"] = all_hours["cumulative_all"] * _qual_ratio
 
     wt_col1, wt_col2 = st.columns(2)
 
@@ -467,7 +462,7 @@ if not daily_channel.empty:
         fig = go.Figure()
         fig.add_bar(x=hours["metric_date"], y=hours["hours_watched"],
                     name="Hours watched (per day)", marker_color="#4C78A8")
-        fig.add_scatter(x=hours["metric_date"], y=hours["cumulative_hours_all"],
+        fig.add_scatter(x=all_hours["metric_date"], y=all_hours["cumulative_all"],
                         name="Cumulative hours (all time)", mode="lines+markers",
                         yaxis="y2", line=dict(color="#F58518", width=3))
         fig.update_layout(
@@ -481,13 +476,13 @@ if not daily_channel.empty:
 
     with wt_col2:
         fig2 = go.Figure()
-        # Promotion (red) on bottom — typically the larger portion
+        # Promotion (red) on bottom — the dominant portion
         fig2.add_bar(x=hours["metric_date"], y=hours["promotion_hours"],
                      name="Promotion hours (per day)", marker_color="rgba(228,87,86,0.75)")
         # Qualifying (green) stacked on top — the smaller portion
         fig2.add_bar(x=hours["metric_date"], y=hours["qualifying_hours"],
                      name="Qualifying hours (per day)", marker_color="#54A24B")
-        fig2.add_scatter(x=hours["metric_date"], y=hours["cumulative_qualifying"],
+        fig2.add_scatter(x=all_hours["metric_date"], y=all_hours["cumulative_qualifying_all"],
                          name="Cumulative qualifying (all time)", mode="lines+markers",
                          yaxis="y2", line=dict(color="#F58518", width=3))
         fig2.update_layout(
@@ -502,7 +497,7 @@ if not daily_channel.empty:
         st.caption(
             f"Qualifying hours = total minus ADVERTISING traffic source hours "
             f"({_qual_ratio * 100:.0f}% qualifying / {_promo_ratio * 100:.0f}% promotion). "
-            f"Cumulative lines reflect all-time totals, not just the selected window."
+            f"Cumulative lines show all-time totals across full channel history."
         )
 
 
