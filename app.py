@@ -419,12 +419,14 @@ if not daily_channel.empty:
     hours["hours_watched"] = hours["estimated_minutes_watched"] / 60
     hours["cumulative_hours"] = hours["hours_watched"].cumsum()
 
-    # Qualifying hours = total hours minus estimated promotion watch hours.
-    # Ratio derived from per-video promotion data in the Qualifying Watch Hours section.
+    # Qualifying ratio: use real per-video ADVERTISING data from the DB.
+    # Fall back to demo data only when the DB has no videos yet.
     try:
-        from pages.qualifying_watch_hours import _build_demo_metrics as _qwh_demo
+        from pages.qualifying_watch_hours import _build_real_metrics as _qwh_real, _build_demo_metrics as _qwh_demo
         from analytics.qualifying_hours import compute_qualifying_hours as _compute_qh
-        _dm = _qwh_demo()
+        _dm = _qwh_real(DB_PATH)
+        if not _dm:
+            _dm = _qwh_demo()
         _report = _compute_qh(_dm)
         _total_wh = sum(m.total_watch_hours for m in _dm)
         _qual_ratio = _report.estimated_qualifying_hours / max(_total_wh, 1)
@@ -433,9 +435,19 @@ if not daily_channel.empty:
         _qual_ratio = 1.0
         _promo_ratio = 0.0
 
-    hours["qualifying_hours"] = hours["hours_watched"] * _qual_ratio
     hours["promotion_hours"] = hours["hours_watched"] * _promo_ratio
+    hours["qualifying_hours"] = hours["hours_watched"] * _qual_ratio
     hours["cumulative_qualifying"] = hours["qualifying_hours"].cumsum()
+
+    # Running totals across ALL available history (not just the selected window)
+    all_hours = daily_channel.sort_values("metric_date").copy()
+    all_hours["hours_watched_all"] = all_hours["estimated_minutes_watched"] / 60
+    all_hours["cumulative_hours_all"] = all_hours["hours_watched_all"].cumsum()
+    # Align the all-time cumulative onto the filtered window for the right y-axis
+    hours = hours.merge(
+        all_hours[["metric_date", "cumulative_hours_all"]],
+        on="metric_date", how="left"
+    )
 
     wt_col1, wt_col2 = st.columns(2)
 
@@ -443,40 +455,42 @@ if not daily_channel.empty:
         fig = go.Figure()
         fig.add_bar(x=hours["metric_date"], y=hours["hours_watched"],
                     name="Hours watched (per day)", marker_color="#4C78A8")
-        fig.add_scatter(x=hours["metric_date"], y=hours["cumulative_hours"],
-                        name="Cumulative hours", mode="lines+markers",
+        fig.add_scatter(x=hours["metric_date"], y=hours["cumulative_hours_all"],
+                        name="Cumulative hours (all time)", mode="lines+markers",
                         yaxis="y2", line=dict(color="#F58518", width=3))
         fig.update_layout(
             title="Daily and Cumulative Watch Time",
             xaxis_title="Date",
             yaxis=dict(title="Hours watched per day"),
-            yaxis2=dict(title="Cumulative hours", overlaying="y", side="right"),
+            yaxis2=dict(title="Cumulative hours (all time)", overlaying="y", side="right"),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         )
         st.plotly_chart(fig, use_container_width=True)
 
     with wt_col2:
         fig2 = go.Figure()
+        # Promotion (red) on bottom — typically the larger portion
+        fig2.add_bar(x=hours["metric_date"], y=hours["promotion_hours"],
+                     name="Promotion hours (per day)", marker_color="rgba(228,87,86,0.75)")
+        # Qualifying (green) stacked on top — the smaller portion
         fig2.add_bar(x=hours["metric_date"], y=hours["qualifying_hours"],
                      name="Qualifying hours (per day)", marker_color="#54A24B")
-        fig2.add_bar(x=hours["metric_date"], y=hours["promotion_hours"],
-                     name="Est. promotion hours (per day)", marker_color="rgba(228,87,86,0.55)")
         fig2.add_scatter(x=hours["metric_date"], y=hours["cumulative_qualifying"],
-                         name="Cumulative qualifying", mode="lines+markers",
+                         name="Cumulative qualifying (all time)", mode="lines+markers",
                          yaxis="y2", line=dict(color="#F58518", width=3))
         fig2.update_layout(
             title="Daily and Cumulative Qualifying Watch Time",
             xaxis_title="Date",
             barmode="stack",
             yaxis=dict(title="Hours per day"),
-            yaxis2=dict(title="Cumulative qualifying hours", overlaying="y", side="right"),
+            yaxis2=dict(title="Cumulative qualifying hours (all time)", overlaying="y", side="right"),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         )
         st.plotly_chart(fig2, use_container_width=True)
         st.caption(
-            f"Qualifying hours estimated using promotion data from the "
-            f"**Qualifying Watch Hours** section "
-            f"({_qual_ratio * 100:.0f}% organic / {_promo_ratio * 100:.0f}% promotion)."
+            f"Qualifying hours = total minus ADVERTISING traffic source hours "
+            f"({_qual_ratio * 100:.0f}% qualifying / {_promo_ratio * 100:.0f}% promotion). "
+            f"Cumulative lines reflect all-time totals, not just the selected window."
         )
 
 
