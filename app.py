@@ -162,17 +162,21 @@ cohort_daily_metrics = load(
     "SELECT metric_date, video_id, views, estimated_minutes_watched, subscribers_gained "
     "FROM daily_video_metrics"
 )
-daily_channel_ctr = load(
-    "SELECT metric_date, impressions, views, ctr FROM daily_channel_ctr ORDER BY metric_date"
+channel_traffic = load(
+    "SELECT traffic_source_type, SUM(views) AS views, "
+    "SUM(estimated_minutes_watched) / 60.0 AS hours "
+    "FROM channel_traffic_sources GROUP BY traffic_source_type ORDER BY views DESC"
 )
-video_ctr = load(
-    "SELECT vc.video_id, v.title, vc.impressions, vc.views, vc.ctr "
-    "FROM video_ctr_metrics vc "
+video_engagement = load(
+    "SELECT d.video_id, v.title, v.duration_seconds, "
+    "d.views, d.estimated_minutes_watched / 60.0 AS hours_watched, "
+    "d.average_view_duration, d.likes, d.subscribers_gained "
+    "FROM daily_video_metrics d "
     "INNER JOIN (SELECT video_id, MAX(metric_date) AS latest_date "
-    "            FROM video_ctr_metrics GROUP BY video_id) latest "
-    "ON vc.video_id = latest.video_id AND vc.metric_date = latest.latest_date "
-    "LEFT JOIN videos v ON vc.video_id = v.video_id "
-    "ORDER BY vc.ctr DESC"
+    "            FROM daily_video_metrics GROUP BY video_id) latest "
+    "ON d.video_id = latest.video_id AND d.metric_date = latest.latest_date "
+    "LEFT JOIN videos v ON d.video_id = v.video_id "
+    "WHERE d.views > 0"
 )
 
 if channel_snapshots.empty:
@@ -512,159 +516,220 @@ if not daily_channel.empty:
             f"Cumulative lines show all-time totals across full channel history."
         )
 
-# --- CTR Analysis ---
+# --- Discovery & Engagement Analysis ---
 
-st.subheader("CTR Analysis")
+st.subheader("Discovery & Engagement Analysis")
+st.caption(
+    "YouTube Analytics API v2 does not expose impression/CTR metrics for channel reports. "
+    "This section uses traffic source breakdown (how viewers find videos) and "
+    "engagement rates (watch %, like rate, subscriber rate) as discovery quality signals."
+)
 
-if daily_channel_ctr.empty and video_ctr.empty:
-    st.info(
-        "No CTR data yet — will populate on the next scheduled fetch. "
-        "Impressions and click-through rate require the YouTube Analytics API "
-        "`impressionClickThroughRate` metric.",
-        icon="ℹ️",
-    )
-else:
-    ctr_days = range_picker("ctr_range", default="Last quarter")
+_eng_tab1, _eng_tab2, _eng_tab3 = st.tabs(["Traffic Sources", "Video Engagement", "Full Table"])
 
-    # --- Aggregate KPIs ---
-    if not daily_channel_ctr.empty:
-        daily_channel_ctr["metric_date"] = pd.to_datetime(daily_channel_ctr["metric_date"])
-        ctr_cutoff = pd.Timestamp.now() - pd.Timedelta(days=ctr_days)
-        ctr_window = daily_channel_ctr[daily_channel_ctr["metric_date"] >= ctr_cutoff]
+_TRAFFIC_LABELS = {
+    "ADVERTISING": "Paid Ads",
+    "BROWSE_FEATURES": "Browse / Home",
+    "YT_SEARCH": "YouTube Search",
+    "NOTIFICATION": "Notifications",
+    "EXT_URL": "External Links",
+    "NO_LINK_EMBEDDED": "Embedded Players",
+    "RELATED_VIDEO": "Suggested Videos",
+    "PLAYLIST": "Playlists",
+    "SUBSCRIBER": "Subscribers Feed",
+    "OTHER": "Other",
+    "SHORTS": "Shorts Feed",
+    "HASHTAGS": "Hashtags",
+    "LIVE_REDIRECT": "Live Redirect",
+    "PRODUCT_PAGE": "Product Page",
+    "NO_LINK_OTHER": "Direct / Unknown",
+    "YT_OTHER_PAGE": "Other YouTube Page",
+    "CAMPAIGN_CARD": "Campaign Card",
+    "END_SCREEN": "End Screen",
+    "SHORTS_VIRAL": "Shorts Viral",
+    "SOUND_PAGE": "Sound Page",
+}
 
-        total_impr = int(ctr_window["impressions"].sum())
-        total_ctr_views = int(ctr_window["views"].sum())
-        avg_ctr = (ctr_window["ctr"] * ctr_window["impressions"]).sum() / max(ctr_window["impressions"].sum(), 1) * 100
+with _eng_tab1:
+    if channel_traffic.empty:
+        st.info("Traffic source data will populate after the next scheduled fetch.", icon="ℹ️")
+    else:
+        ct = channel_traffic.copy()
+        ct["label"] = ct["traffic_source_type"].map(lambda x: _TRAFFIC_LABELS.get(x, x))
+        total_views_traffic = ct["views"].sum()
 
-        ka1, ka2, ka3, ka4 = st.columns(4)
-        ka1.metric("Total Impressions", f"{total_impr:,}",
-                   help="Number of times thumbnails were shown to logged-in viewers.")
-        ka2.metric("Channel Avg CTR", f"{avg_ctr:.2f}%",
-                   help="Impression-weighted average click-through rate across the period.")
-        ka3.metric("Views from Impressions", f"{total_ctr_views:,}",
-                   help="Views attributed to YouTube impression surfaces (not all views).")
-        ka4.metric("Impressions → Views ratio", f"{total_ctr_views / max(total_impr, 1) * 100:.2f}%",
-                   help="Cross-check: should closely match Avg CTR.")
+        # Aggregate KPIs
+        _tc1, _tc2, _tc3 = st.columns(3)
+        organic_views = ct[~ct["traffic_source_type"].isin(["ADVERTISING"])]["views"].sum()
+        adv_views = ct[ct["traffic_source_type"] == "ADVERTISING"]["views"].sum()
+        top_source = ct.iloc[0]["label"] if not ct.empty else "—"
+        _tc1.metric("Total Views (90-day)", f"{int(total_views_traffic):,}")
+        _tc2.metric("Organic Views", f"{int(organic_views):,}",
+                    help="All sources except Paid Ads")
+        _tc3.metric("Top Discovery Source", top_source)
 
-        # Daily CTR trend
-        fig_ctr = go.Figure()
-        fig_ctr.add_scatter(
-            x=ctr_window["metric_date"], y=ctr_window["ctr"] * 100,
-            name="Daily CTR %", mode="lines+markers",
-            line=dict(color="#4C78A8", width=2),
-        )
-        # 7-day rolling average
-        ctr_roll = ctr_window.sort_values("metric_date").copy()
-        ctr_roll["ctr_roll7"] = (
-            (ctr_roll["ctr"] * ctr_roll["impressions"]).rolling(7, min_periods=1).sum()
-            / ctr_roll["impressions"].rolling(7, min_periods=1).sum() * 100
-        )
-        fig_ctr.add_scatter(
-            x=ctr_roll["metric_date"], y=ctr_roll["ctr_roll7"],
-            name="7-day rolling avg", mode="lines",
-            line=dict(color="#F58518", width=2, dash="dot"),
-        )
-        fig_ctr.update_layout(
-            title="Daily Click-Through Rate",
-            xaxis_title="Date", yaxis_title="CTR %",
-            height=320, hovermode="x unified",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        )
-        st.plotly_chart(fig_ctr, use_container_width=True)
+        # Pie chart + bar side by side
+        _pie_col, _bar_col = st.columns(2)
 
-    # --- Per-video CTR: best to worst ---
-    if not video_ctr.empty:
-        st.markdown("**Per-Video CTR — Best to Worst**")
-
-        vctr = video_ctr.copy()
-        vctr["CTR %"] = (vctr["ctr"] * 100).round(2)
-        vctr["title_short"] = vctr["title"].fillna(vctr["video_id"]).str[:55]
-
-        ctr_tab1, ctr_tab2 = st.tabs(["Bar Chart", "Full Table"])
-
-        with ctr_tab1:
-            # Show top 30 and bottom 10 in one ranked chart
-            vctr_sorted = vctr.sort_values("CTR %", ascending=False).reset_index(drop=True)
-            channel_avg_ctr = (vctr_sorted["ctr"] * vctr_sorted["impressions"]).sum() / max(vctr_sorted["impressions"].sum(), 1) * 100
-
-            fig_bar = go.Figure()
-            colors = ["#54A24B" if c >= channel_avg_ctr else "#E45756" for c in vctr_sorted["CTR %"]]
-            fig_bar.add_bar(
-                x=vctr_sorted["title_short"],
-                y=vctr_sorted["CTR %"],
-                marker_color=colors,
-                hovertemplate=(
-                    "<b>%{x}</b><br>"
-                    "CTR: %{y:.2f}%<br>"
-                    "Impressions: %{customdata[0]:,}<br>"
-                    "Views: %{customdata[1]:,}<extra></extra>"
-                ),
-                customdata=vctr_sorted[["impressions", "views"]].values,
-            )
-            fig_bar.add_hline(
-                y=channel_avg_ctr,
-                line=dict(color="#F58518", width=1.5, dash="dash"),
-                annotation_text=f"Channel avg {channel_avg_ctr:.2f}%",
-                annotation_position="top right",
-            )
-            fig_bar.update_layout(
-                title="CTR by Video (green = above average, red = below)",
-                xaxis_title="Video",
-                yaxis_title="CTR %",
-                height=420,
-                xaxis_tickangle=-45,
-            )
-            st.plotly_chart(fig_bar, use_container_width=True)
-
-            # Scatter: impressions vs CTR — reveals reach/quality tradeoff
-            fig_scatter = go.Figure()
-            fig_scatter.add_scatter(
-                x=vctr_sorted["impressions"],
-                y=vctr_sorted["CTR %"],
-                mode="markers+text",
-                text=vctr_sorted["title_short"],
-                textposition="top center",
-                textfont=dict(size=9),
-                marker=dict(
-                    size=vctr_sorted["views"].clip(upper=vctr_sorted["views"].quantile(0.95)) / vctr_sorted["views"].max() * 30 + 6,
-                    color=vctr_sorted["CTR %"],
-                    colorscale="RdYlGn",
-                    showscale=True,
-                    colorbar=dict(title="CTR %"),
-                ),
-                hovertemplate=(
-                    "<b>%{text}</b><br>"
-                    "Impressions: %{x:,}<br>"
-                    "CTR: %{y:.2f}%<extra></extra>"
-                ),
-            )
-            fig_scatter.update_layout(
-                title="Impressions vs CTR — bubble size = views",
-                xaxis_title="Impressions",
-                yaxis_title="CTR %",
-                height=500,
+        with _pie_col:
+            fig_pie = go.Figure(go.Pie(
+                labels=ct["label"],
+                values=ct["views"],
+                hole=0.4,
+                hovertemplate="<b>%{label}</b><br>Views: %{value:,}<br>Share: %{percent}<extra></extra>",
+                textinfo="percent+label",
+                textfont_size=11,
+            ))
+            fig_pie.update_layout(
+                title="Views by Discovery Channel",
+                height=380,
                 showlegend=False,
+                margin=dict(t=50, b=20, l=20, r=20),
             )
-            st.plotly_chart(fig_scatter, use_container_width=True)
-            st.caption("Videos in the top-right quadrant have both high reach AND high CTR — your best thumbnails/titles.")
+            st.plotly_chart(fig_pie, use_container_width=True)
 
-        with ctr_tab2:
-            display_cols = {
-                "title": "Video",
-                "impressions": "Impressions",
-                "views": "Views",
-                "CTR %": "CTR %",
-            }
-            tbl = vctr_sorted[list(display_cols.keys())].rename(columns=display_cols)
-            st.dataframe(
-                tbl.style.background_gradient(subset=["CTR %"], cmap="RdYlGn"),
-                use_container_width=True,
-                hide_index=True,
+        with _bar_col:
+            ct_sorted = ct.sort_values("views", ascending=True)
+            bar_colors = ["#E45756" if t == "ADVERTISING" else "#4C78A8"
+                          for t in ct_sorted["traffic_source_type"]]
+            fig_tsbar = go.Figure(go.Bar(
+                x=ct_sorted["views"],
+                y=ct_sorted["label"],
+                orientation="h",
+                marker_color=bar_colors,
+                hovertemplate="<b>%{y}</b><br>Views: %{x:,}<br>Watch hrs: %{customdata:.0f}<extra></extra>",
+                customdata=ct_sorted["hours"],
+            ))
+            fig_tsbar.update_layout(
+                title="Views by Source (red = paid)",
+                xaxis_title="Views",
+                height=380,
+                margin=dict(t=50, b=20, l=20, r=20),
             )
-            st.caption(
-                f"{len(tbl)} videos · Channel avg CTR {channel_avg_ctr:.2f}% · "
-                "Data reflects the most recent 90-day fetch window per video."
-            )
+            st.plotly_chart(fig_tsbar, use_container_width=True)
+
+        st.caption("Data reflects the most recent 90-day fetch window. Paid Ads = ADVERTISING traffic source.")
+
+with _eng_tab2:
+    if video_engagement.empty:
+        st.info("No video engagement data available yet.", icon="ℹ️")
+    else:
+        veng = video_engagement.copy()
+        veng["title_short"] = veng["title"].fillna(veng["video_id"]).str[:50]
+        veng["watch_rate"] = (
+            veng["average_view_duration"] / veng["duration_seconds"].clip(lower=1) * 100
+        ).clip(upper=100).round(1)
+        veng["like_rate"] = (veng["likes"] / veng["views"].clip(lower=1) * 100).round(2)
+        veng["sub_rate"] = (veng["subscribers_gained"] / veng["views"].clip(lower=1) * 100).round(3)
+
+        _rank_by = st.selectbox(
+            "Rank by", ["Watch Rate %", "Views", "Like Rate %", "Subscriber Rate %"],
+            key="eng_rank"
+        )
+        _rank_col_map = {
+            "Watch Rate %": "watch_rate",
+            "Views": "views",
+            "Like Rate %": "like_rate",
+            "Subscriber Rate %": "sub_rate",
+        }
+        veng_sorted = veng.sort_values(_rank_col_map[_rank_by], ascending=False).reset_index(drop=True)
+
+        # Channel averages for reference lines
+        _avg_watch = veng_sorted["watch_rate"].mean()
+        _avg_like = veng_sorted["like_rate"].mean()
+        _rank_metric = _rank_col_map[_rank_by]
+        _avg_val = veng_sorted[_rank_metric].mean()
+        _y_vals = veng_sorted[_rank_metric]
+        _colors = ["#54A24B" if v >= _avg_val else "#E45756" for v in _y_vals]
+
+        fig_eng = go.Figure(go.Bar(
+            x=veng_sorted["title_short"],
+            y=_y_vals,
+            marker_color=_colors,
+            hovertemplate=(
+                "<b>%{x}</b><br>"
+                f"{_rank_by}: %{{y:.2f}}<br>"
+                "Views: %{customdata[0]:,}<br>"
+                "Watch Rate: %{customdata[1]:.1f}%<br>"
+                "Like Rate: %{customdata[2]:.2f}%<extra></extra>"
+            ),
+            customdata=veng_sorted[["views", "watch_rate", "like_rate"]].values,
+        ))
+        fig_eng.add_hline(
+            y=_avg_val,
+            line=dict(color="#F58518", width=1.5, dash="dash"),
+            annotation_text=f"Avg {_avg_val:.2f}",
+            annotation_position="top right",
+        )
+        fig_eng.update_layout(
+            title=f"Videos Ranked by {_rank_by} (green = above average)",
+            xaxis_title="Video",
+            yaxis_title=_rank_by,
+            height=440,
+            xaxis_tickangle=-45,
+        )
+        st.plotly_chart(fig_eng, use_container_width=True)
+
+        # Scatter: views vs watch rate — reveals high-reach vs high-retention tradeoff
+        fig_scat = go.Figure(go.Scatter(
+            x=veng_sorted["views"],
+            y=veng_sorted["watch_rate"],
+            mode="markers",
+            text=veng_sorted["title_short"],
+            marker=dict(
+                size=veng_sorted["like_rate"].clip(lower=0.01) * 8 + 6,
+                color=veng_sorted["watch_rate"],
+                colorscale="RdYlGn",
+                showscale=True,
+                colorbar=dict(title="Watch %"),
+                opacity=0.8,
+            ),
+            hovertemplate=(
+                "<b>%{text}</b><br>"
+                "Views: %{x:,}<br>"
+                "Watch Rate: %{y:.1f}%<br>"
+                "Bubble size ∝ Like Rate<extra></extra>"
+            ),
+        ))
+        fig_scat.add_vline(x=veng_sorted["views"].median(), line=dict(color="#aaa", dash="dot"))
+        fig_scat.add_hline(y=_avg_watch, line=dict(color="#aaa", dash="dot"))
+        fig_scat.update_layout(
+            title="Views vs Watch Rate — bubble size = like rate",
+            xaxis_title="Views (90-day window)",
+            yaxis_title="Watch Rate %",
+            height=480,
+            showlegend=False,
+        )
+        st.plotly_chart(fig_scat, use_container_width=True)
+        st.caption(
+            "Top-right = high views AND high watch rate (algorithm favors these). "
+            "Top-left = niche but highly engaging. Bottom-right = high reach but viewers bail early."
+        )
+
+with _eng_tab3:
+    if video_engagement.empty:
+        st.info("No data.", icon="ℹ️")
+    else:
+        tbl_eng = veng_sorted[[
+            "title", "views", "hours_watched", "watch_rate", "like_rate", "sub_rate"
+        ]].rename(columns={
+            "title": "Video",
+            "views": "Views",
+            "hours_watched": "Watch Hours",
+            "watch_rate": "Watch Rate %",
+            "like_rate": "Like Rate %",
+            "sub_rate": "Sub Rate %",
+        }).copy()
+        tbl_eng["Watch Hours"] = tbl_eng["Watch Hours"].round(1)
+        st.dataframe(
+            tbl_eng.style.background_gradient(subset=["Watch Rate %", "Like Rate %"], cmap="RdYlGn"),
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.caption(
+            f"{len(tbl_eng)} videos · Avg watch rate {_avg_watch:.1f}% · Avg like rate {_avg_like:.2f}% · "
+            "Watch Rate = avg view duration ÷ video length. Data: most recent 90-day fetch per video."
+        )
 
 
 def render_retention(rb_full, toggle, today, video_id=None):

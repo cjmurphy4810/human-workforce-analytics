@@ -18,12 +18,11 @@ from youtube_client import (
     fetch_all_video_ids,
     fetch_channel_playlists,
     fetch_channel_stats,
+    fetch_channel_traffic_sources,
     fetch_daily_channel_metrics,
-    fetch_daily_ctr_metrics,
     fetch_daily_geo_metrics,
     fetch_playlist_video_ids,
     fetch_retention_curve,
-    fetch_video_ctr_metrics,
     fetch_video_details,
     fetch_video_period_metrics,
     fetch_video_traffic_source_metrics,
@@ -213,21 +212,13 @@ def main() -> None:
         print(f"  daily geo metrics failed ({e.__class__.__name__}: {e}), skipping.")
         daily_geo = []
 
-    print(f"Fetching video CTR metrics {start} -> {end}...")
+    print(f"Fetching channel traffic source breakdown {start} -> {end}...")
     try:
-        video_ctr = fetch_video_ctr_metrics(start, end, channel_id)
-        print(f"  {len(video_ctr)} video CTR rows.")
+        channel_traffic = fetch_channel_traffic_sources(start, end, channel_id)
+        print(f"  {len(channel_traffic)} traffic source types.")
     except Exception as e:
-        print(f"  video CTR metrics failed ({e.__class__.__name__}: {e}), skipping.")
-        video_ctr = []
-
-    print(f"Fetching daily channel CTR metrics {start} -> {end}...")
-    try:
-        daily_ctr = fetch_daily_ctr_metrics(start, end, channel_id)
-        print(f"  {len(daily_ctr)} daily CTR rows.")
-    except Exception as e:
-        print(f"  daily CTR metrics failed ({e.__class__.__name__}: {e}), skipping.")
-        daily_ctr = []
+        print(f"  channel traffic sources failed ({e.__class__.__name__}: {e}), skipping.")
+        channel_traffic = []
 
     print(f"Fetching ADVERTISING traffic source metrics for {len(video_ids)} videos {start} -> {end}...")
     try:
@@ -308,22 +299,15 @@ def main() -> None:
                  d["average_view_duration"], d["likes"], d["subscribers_gained"]),
             )
 
-        for d in video_ctr:
+        for d in channel_traffic:
             conn.execute(
-                "INSERT INTO video_ctr_metrics(metric_date, video_id, impressions, views, ctr) "
-                "VALUES (?, ?, ?, ?, ?) "
-                "ON CONFLICT(metric_date, video_id) DO UPDATE SET "
-                "impressions=excluded.impressions, views=excluded.views, ctr=excluded.ctr",
-                (d["metric_date"], d["video_id"], d["impressions"], d["views"], d["ctr"]),
-            )
-
-        for d in daily_ctr:
-            conn.execute(
-                "INSERT INTO daily_channel_ctr(metric_date, impressions, views, ctr) "
-                "VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(metric_date) DO UPDATE SET "
-                "impressions=excluded.impressions, views=excluded.views, ctr=excluded.ctr",
-                (d["metric_date"], d["impressions"], d["views"], d["ctr"]),
+                "INSERT INTO channel_traffic_sources(metric_date, traffic_source_type, views, "
+                "estimated_minutes_watched) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(metric_date, traffic_source_type) DO UPDATE SET "
+                "views=excluded.views, "
+                "estimated_minutes_watched=excluded.estimated_minutes_watched",
+                (d["metric_date"], d["traffic_source_type"], d["views"],
+                 d["estimated_minutes_watched"]),
             )
 
         for d in traffic_source:

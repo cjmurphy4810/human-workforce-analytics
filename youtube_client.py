@@ -282,50 +282,30 @@ def fetch_video_traffic_source_metrics(
     return results
 
 
-def fetch_video_ctr_metrics(start: date, end: date, channel_id: str | None = None) -> list[dict]:
-    """Fetch impressions, views, and CTR per video for the date range."""
+def fetch_channel_traffic_sources(start: date, end: date, channel_id: str | None = None) -> list[dict]:
+    """Fetch channel-level views broken down by insightTrafficSourceType.
+
+    Note: impressions / impressionClickThroughRate are NOT available in the
+    YouTube Analytics API v2 (channel=MINE reports). Traffic source views are
+    the closest available proxy for discovery channel performance.
+    """
     yt = analytics_service()
     ids = f"channel=={channel_id}" if channel_id else "channel==MINE"
     resp = yt.reports().query(
         ids=ids,
         startDate=start.isoformat(),
         endDate=end.isoformat(),
-        metrics="impressions,impressionClickThroughRate,views",
-        dimensions="video",
-        maxResults=200,
-        sort="-impressions",
+        metrics="views,estimatedMinutesWatched",
+        dimensions="insightTrafficSourceType",
+        sort="-views",
     ).execute()
     rows = resp.get("rows", [])
     return [
         {
             "metric_date": end.isoformat(),
-            "video_id": r[0],
-            "impressions": int(r[1]),
-            "ctr": float(r[2]),
-            "views": int(r[3]),
-        }
-        for r in rows
-    ]
-
-
-def fetch_daily_ctr_metrics(start: date, end: date, channel_id: str | None = None) -> list[dict]:
-    """Fetch channel-level daily impressions, views, and CTR."""
-    yt = analytics_service()
-    ids = f"channel=={channel_id}" if channel_id else "channel==MINE"
-    resp = yt.reports().query(
-        ids=ids,
-        startDate=start.isoformat(),
-        endDate=end.isoformat(),
-        metrics="impressions,impressionClickThroughRate,views",
-        dimensions="day",
-    ).execute()
-    rows = resp.get("rows", [])
-    return [
-        {
-            "metric_date": r[0],
-            "impressions": int(r[1]),
-            "ctr": float(r[2]),
-            "views": int(r[3]),
+            "traffic_source_type": r[0],
+            "views": int(r[1]),
+            "estimated_minutes_watched": float(r[2]),
         }
         for r in rows
     ]
