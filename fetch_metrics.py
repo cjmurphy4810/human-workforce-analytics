@@ -9,10 +9,13 @@ Run twice daily via GitHub Actions. Stores:
 import json
 import os
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 import anthropic
 
 from ai_client import classify_video_themes, fetch_news_headlines, rank_videos_by_news
+from content_intelligence.service import run_scoring as _ci_run_scoring
+from db import DB_PATH as _DB_PATH
 from db import get_conn, init_db
 from youtube_client import (
     fetch_all_video_ids,
@@ -364,6 +367,13 @@ def main() -> None:
         write_queue_recommendations(ranked_for_recs, date.today())
     except Exception as e:
         print(f"  Queue recommendations write failed ({e.__class__.__name__}), skipping.")
+
+    print("Running content intelligence scoring...")
+    try:
+        ci_scores = _ci_run_scoring(Path(str(_DB_PATH)))
+        print(f"  Content intelligence: scored {len(ci_scores)} videos.")
+    except Exception as e:
+        print(f"  Content intelligence scoring failed ({e.__class__.__name__}), skipping.")
 
     print("Done.")
 

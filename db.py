@@ -137,6 +137,43 @@ CREATE TABLE IF NOT EXISTS channel_traffic_sources (
 );
 CREATE INDEX IF NOT EXISTS idx_channel_traffic_date
     ON channel_traffic_sources(metric_date);
+
+CREATE TABLE IF NOT EXISTS ci_video_scores (
+    scored_at               TEXT NOT NULL,
+    video_id                TEXT NOT NULL,
+    tier                    TEXT NOT NULL,
+    engagement_score        REAL,
+    evergreen_score         REAL,
+    subscriber_magnet_score REAL,
+    hidden_gem_score        REAL,
+    overall_score           REAL,
+    total_views             INTEGER,
+    watch_rate_pct          REAL,
+    like_rate_pct           REAL,
+    sub_rate_pct            REAL,
+    promotion_ratio         REAL,
+    PRIMARY KEY (scored_at, video_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ci_scores_date
+    ON ci_video_scores(scored_at);
+
+CREATE TABLE IF NOT EXISTS ci_content_assets (
+    asset_id      TEXT PRIMARY KEY,
+    video_id      TEXT NOT NULL,
+    video_title   TEXT,
+    asset_type    TEXT NOT NULL,
+    title         TEXT,
+    body          TEXT NOT NULL,
+    generated_at  TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'draft',
+    approved_at   TEXT,
+    scheduled_for TEXT,
+    notes         TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_ci_assets_video
+    ON ci_content_assets(video_id);
+CREATE INDEX IF NOT EXISTS idx_ci_assets_status
+    ON ci_content_assets(status, asset_type);
 """
 
 
