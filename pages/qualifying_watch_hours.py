@@ -320,21 +320,43 @@ def _build_real_metrics(db_path: Path) -> list[VideoPromotionMetrics]:
 
 
 def _build_real_timeseries(db_path: Path) -> pd.DataFrame:
-    """Aggregate real daily_channel_metrics into a weekly time-series."""
+    """Aggregate real daily_channel_metrics into weekly time-series.
+
+    Splits each week's total hours into organic vs promotion using the channel-level
+    ADVERTISING ratio from video_traffic_source_metrics (latest per-video snapshot).
+    """
     df = _db_query(str(db_path),
         "SELECT metric_date, estimated_minutes_watched "
         "FROM daily_channel_metrics ORDER BY metric_date")
     if df.empty:
         return pd.DataFrame()
+
+    # Compute ADVERTISING ratio from per-video data
+    total_row = _db_query(str(db_path),
+        "SELECT SUM(d.estimated_minutes_watched/60.0) AS total_wh "
+        "FROM daily_video_metrics d "
+        "INNER JOIN (SELECT video_id, MAX(metric_date) AS latest_date "
+        "FROM daily_video_metrics GROUP BY video_id) latest "
+        "ON d.video_id=latest.video_id AND d.metric_date=latest.latest_date")
+    adv_row = _db_query(str(db_path),
+        "SELECT SUM(d.estimated_minutes_watched/60.0) AS adv_wh "
+        "FROM video_traffic_source_metrics d "
+        "INNER JOIN (SELECT video_id, MAX(metric_date) AS latest_date "
+        "FROM video_traffic_source_metrics WHERE traffic_source_type='ADVERTISING' "
+        "GROUP BY video_id) latest "
+        "ON d.video_id=latest.video_id AND d.metric_date=latest.latest_date "
+        "WHERE d.traffic_source_type='ADVERTISING'")
+    total_wh = float(total_row["total_wh"].iloc[0] or 0) if not total_row.empty else 0.0
+    adv_wh = float(adv_row["adv_wh"].iloc[0] or 0) if not adv_row.empty else 0.0
+    promo_ratio = adv_wh / max(total_wh, 1.0)
+    qual_ratio = 1.0 - promo_ratio
+
     df["metric_date"] = pd.to_datetime(df["metric_date"])
     df["week"] = df["metric_date"].dt.to_period("W").apply(lambda p: p.start_time.date())
-    weekly = (
-        df.groupby("week")["estimated_minutes_watched"]
-        .sum()
-        .reset_index()
-    )
-    weekly["organic_hours"] = weekly["estimated_minutes_watched"] / 60
-    weekly["promotion_hours"] = 0.0
+    weekly = df.groupby("week")["estimated_minutes_watched"].sum().reset_index()
+    weekly["total_hours"] = weekly["estimated_minutes_watched"] / 60
+    weekly["promotion_hours"] = weekly["total_hours"] * promo_ratio
+    weekly["organic_hours"] = weekly["total_hours"] * qual_ratio
     weekly["qualifying_hours"] = weekly["organic_hours"]
     return weekly[["week", "organic_hours", "promotion_hours", "qualifying_hours"]]
 
@@ -706,6 +728,108 @@ def _render_promotion_impact(metrics: list[VideoPromotionMetrics]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Projections
+# ---------------------------------------------------------------------------
+
+def _render_projections(db_path: Path, qual_ratio: float) -> None:
+    """Show projected qualifying hours at 30 / 90 / 180 / 365 days."""
+    from datetime import date as _date
+
+    # Current cumulative qualifying hours (all available history)
+    cur_row = _db_query(str(db_path),
+        "SELECT SUM(estimated_minutes_watched)/60.0 AS hrs FROM daily_channel_metrics")
+    current_total = float(cur_row["hrs"].iloc[0] or 0) if not cur_row.empty else 0.0
+    current_qualifying = current_total * qual_ratio
+
+    # Recent daily rate: last 30 days of channel metrics × qual_ratio
+    cutoff = (_date.today() - __import__("datetime").timedelta(days=30)).isoformat()
+    rate_row = _db_query(str(db_path),
+        f"SELECT AVG(estimated_minutes_watched)/60.0 AS daily_hrs "
+        f"FROM daily_channel_metrics WHERE metric_date >= '{cutoff}'")
+    daily_total_rate = float(rate_row["daily_hrs"].iloc[0] or 0) if not rate_row.empty else 0.0
+    daily_qual_rate = daily_total_rate * qual_ratio
+
+    if daily_qual_rate <= 0:
+        st.info("Not enough history to project qualifying hours.")
+        return
+
+    milestones = [30, 90, 180, 365]
+    projected = {d: current_qualifying + daily_qual_rate * d for d in milestones}
+    days_to_ypp = (
+        (_YPP_WATCH_HOURS_THRESHOLD - current_qualifying) / daily_qual_rate
+        if current_qualifying < _YPP_WATCH_HOURS_THRESHOLD else 0
+    )
+
+    st.subheader("Qualifying Hours Projection")
+    st.caption(
+        f"Based on {daily_total_rate:.1f} total hrs/day average over the last 30 days "
+        f"× {qual_ratio * 100:.0f}% qualifying ratio = **{daily_qual_rate:.1f} qualifying hrs/day**."
+    )
+
+    pc1, pc2, pc3, pc4 = st.columns(4)
+    for col, days in zip([pc1, pc2, pc3, pc4], milestones):
+        label = {30: "+30 Days", 90: "+90 Days", 180: "+6 Months", 365: "+1 Year"}[days]
+        pct = projected[days] / _YPP_WATCH_HOURS_THRESHOLD * 100
+        col.metric(
+            label,
+            f"{projected[days]:,.0f} hrs",
+            delta=f"{pct:.0f}% of YPP threshold",
+            delta_color="normal" if projected[days] >= _YPP_WATCH_HOURS_THRESHOLD else "off",
+        )
+
+    if days_to_ypp > 0:
+        target_date = _date.today() + __import__("datetime").timedelta(days=int(days_to_ypp))
+        st.info(
+            f"At the current rate you'll reach the **3,000 hr YPP threshold** in "
+            f"**{int(days_to_ypp)} days** (~{target_date.strftime('%B %d, %Y')}).",
+            icon="🎯",
+        )
+    else:
+        st.success("YPP watch hour threshold already reached!", icon="✅")
+
+    # Projection chart
+    import numpy as np
+    future_days = np.arange(0, 366)
+    future_qual = current_qualifying + daily_qual_rate * future_days
+    today = _date.today()
+    future_dates = [today + __import__("datetime").timedelta(days=int(d)) for d in future_days]
+
+    fig = go.Figure()
+    fig.add_scatter(
+        x=future_dates, y=future_qual,
+        name="Projected qualifying hrs",
+        mode="lines",
+        line=dict(color="#54A24B", width=2),
+        fill="tozeroy",
+        fillcolor="rgba(84,162,75,0.15)",
+    )
+    fig.add_hline(
+        y=_YPP_WATCH_HOURS_THRESHOLD,
+        line=dict(color="#E45756", width=2, dash="dash"),
+        annotation_text="YPP 3,000 hr threshold",
+        annotation_position="top left",
+    )
+    for days in milestones:
+        fig.add_vline(
+            x=str(today + __import__("datetime").timedelta(days=days)),
+            line=dict(color="rgba(255,255,255,0.2)", width=1, dash="dot"),
+        )
+    fig.update_layout(
+        title="Projected Qualifying Watch Hours (Next 365 Days)",
+        xaxis_title="Date",
+        yaxis_title="Cumulative Qualifying Hours",
+        height=360,
+        hovermode="x unified",
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption(
+        "Projection assumes constant qualifying rate from last 30 days. "
+        "Actual hours depend on future promotion spend and organic growth. "
+        "Excludes Shorts watch time (not counted by YouTube for YPP)."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main render function
 # ---------------------------------------------------------------------------
 
@@ -973,6 +1097,11 @@ def render(db_path: Path) -> None:
             "Upload a Promotion CSV in the sidebar to subtract promotion-generated hours.",
             icon="ℹ️",
         )
+
+    # --- Projections (live data only) ---
+    if source_mode == "Live Data" and has_real_data and total_watch_hrs > 0:
+        _qual_ratio_proj = report.estimated_qualifying_hours / max(total_watch_hrs, 1)
+        _render_projections(db_path, _qual_ratio_proj)
 
     # --- Charts ---
     st.subheader("Charts")
