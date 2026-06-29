@@ -732,100 +732,139 @@ def _render_promotion_impact(metrics: list[VideoPromotionMetrics]) -> None:
 # ---------------------------------------------------------------------------
 
 def _render_projections(db_path: Path, qual_ratio: float) -> None:
-    """Show projected qualifying hours at 30 / 90 / 180 / 365 days."""
-    from datetime import date as _date
+    """Show projected qualifying hours under three rate scenarios."""
+    import datetime as _dt
+    import numpy as np
+
+    today = _dt.date.today()
 
     # Current cumulative qualifying hours (all available history)
     cur_row = _db_query(str(db_path),
-        "SELECT SUM(estimated_minutes_watched)/60.0 AS hrs FROM daily_channel_metrics")
+        "SELECT SUM(estimated_minutes_watched)/60.0 AS hrs, "
+        "COUNT(*) AS days FROM daily_channel_metrics")
     current_total = float(cur_row["hrs"].iloc[0] or 0) if not cur_row.empty else 0.0
+    channel_days = int(cur_row["days"].iloc[0] or 1) if not cur_row.empty else 1
     current_qualifying = current_total * qual_ratio
 
-    # Recent daily rate: last 30 days of channel metrics × qual_ratio
-    cutoff = (_date.today() - __import__("datetime").timedelta(days=30)).isoformat()
-    rate_row = _db_query(str(db_path),
-        f"SELECT AVG(estimated_minutes_watched)/60.0 AS daily_hrs "
-        f"FROM daily_channel_metrics WHERE metric_date >= '{cutoff}'")
-    daily_total_rate = float(rate_row["daily_hrs"].iloc[0] or 0) if not rate_row.empty else 0.0
-    daily_qual_rate = daily_total_rate * qual_ratio
+    def _avg_rate(lookback_days: int) -> float:
+        cutoff = (today - _dt.timedelta(days=lookback_days)).isoformat()
+        r = _db_query(str(db_path),
+            f"SELECT AVG(estimated_minutes_watched)/60.0 AS d "
+            f"FROM daily_channel_metrics WHERE metric_date >= '{cutoff}'")
+        return float(r["d"].iloc[0] or 0) if not r.empty else 0.0
 
-    if daily_qual_rate <= 0:
+    rate_30d = _avg_rate(30) * qual_ratio    # recent (last 30 days)
+    rate_90d = _avg_rate(90) * qual_ratio    # medium-term (last 90 days)
+    rate_life = (current_total / max(channel_days, 1)) * qual_ratio  # lifetime avg
+
+    if rate_life <= 0:
         st.info("Not enough history to project qualifying hours.")
         return
 
-    milestones = [30, 90, 180, 365]
-    projected = {d: current_qualifying + daily_qual_rate * d for d in milestones}
-    days_to_ypp = (
-        (_YPP_WATCH_HOURS_THRESHOLD - current_qualifying) / daily_qual_rate
-        if current_qualifying < _YPP_WATCH_HOURS_THRESHOLD else 0
-    )
-
     st.subheader("Qualifying Hours Projection")
-    st.caption(
-        f"Based on {daily_total_rate:.1f} total hrs/day average over the last 30 days "
-        f"× {qual_ratio * 100:.0f}% qualifying ratio = **{daily_qual_rate:.1f} qualifying hrs/day**."
+
+    # Rate comparison table
+    rc1, rc2, rc3 = st.columns(3)
+    rc1.metric(
+        "Conservative (Lifetime Avg)",
+        f"{rate_life:.1f} qualifying hrs/day",
+        delta=f"{rate_life * 30:.0f} hrs / month",
+        delta_color="off",
+        help=f"Based on all {channel_days} days of channel history. "
+             "Best estimate if growth has plateaued.",
+    )
+    rc2.metric(
+        "Moderate (Last 90 Days)",
+        f"{rate_90d:.1f} qualifying hrs/day",
+        delta=f"{rate_90d * 30:.0f} hrs / month",
+        delta_color="off",
+        help="Smooths out short-term spikes. A reasonable middle ground.",
+    )
+    rc3.metric(
+        "Optimistic (Last 30 Days)",
+        f"{rate_30d:.1f} qualifying hrs/day",
+        delta=f"{rate_30d * 30:.0f} hrs / month",
+        delta_color="off",
+        help="Reflects your most recent growth pace. Could reflect subscriber "
+             "flywheel effects OR a temporary spike in promotion spend.",
     )
 
-    pc1, pc2, pc3, pc4 = st.columns(4)
-    for col, days in zip([pc1, pc2, pc3, pc4], milestones):
-        label = {30: "+30 Days", 90: "+90 Days", 180: "+6 Months", 365: "+1 Year"}[days]
-        pct = projected[days] / _YPP_WATCH_HOURS_THRESHOLD * 100
-        col.metric(
-            label,
-            f"{projected[days]:,.0f} hrs",
-            delta=f"{pct:.0f}% of YPP threshold",
-            delta_color="normal" if projected[days] >= _YPP_WATCH_HOURS_THRESHOLD else "off",
-        )
-
-    if days_to_ypp > 0:
-        target_date = _date.today() + __import__("datetime").timedelta(days=int(days_to_ypp))
+    # Gap explanation
+    if rate_30d > rate_life * 1.1:
+        accel_pct = (rate_30d / rate_life - 1) * 100
         st.info(
-            f"At the current rate you'll reach the **3,000 hr YPP threshold** in "
-            f"**{int(days_to_ypp)} days** (~{target_date.strftime('%B %d, %Y')}).",
-            icon="🎯",
+            f"Your recent rate ({rate_30d:.1f} qualifying hrs/day) is **{accel_pct:.0f}% faster** "
+            f"than your lifetime average ({rate_life:.1f} hrs/day). This likely reflects a mix of "
+            f"subscriber growth (more organic reach per video), recent promotion spend, "
+            f"and natural channel momentum. The Conservative line accounts for the possibility "
+            f"that some of this acceleration is temporary.",
+            icon="📈",
         )
-    else:
-        st.success("YPP watch hour threshold already reached!", icon="✅")
 
-    # Projection chart
-    import numpy as np
+    # Scenario milestones
+    st.markdown("**Days to YPP threshold (3,000 hrs) by scenario**")
+    mil1, mil2, mil3 = st.columns(3)
+    for col, rate, label in [
+        (mil1, rate_life, "Conservative"),
+        (mil2, rate_90d, "Moderate"),
+        (mil3, rate_30d, "Optimistic"),
+    ]:
+        if current_qualifying >= _YPP_WATCH_HOURS_THRESHOLD:
+            col.metric(label, "Already reached ✅")
+        elif rate <= 0:
+            col.metric(label, "—")
+        else:
+            days_left = (_YPP_WATCH_HOURS_THRESHOLD - current_qualifying) / rate
+            target = today + _dt.timedelta(days=int(days_left))
+            col.metric(
+                label,
+                f"{int(days_left)} days",
+                delta=target.strftime("%b %d, %Y"),
+                delta_color="off",
+            )
+
+    # Projection chart — all three scenarios
     future_days = np.arange(0, 366)
-    future_qual = current_qualifying + daily_qual_rate * future_days
-    today = _date.today()
-    future_dates = [today + __import__("datetime").timedelta(days=int(d)) for d in future_days]
+    future_dates = [today + _dt.timedelta(days=int(d)) for d in future_days]
 
     fig = go.Figure()
-    fig.add_scatter(
-        x=future_dates, y=future_qual,
-        name="Projected qualifying hrs",
-        mode="lines",
-        line=dict(color="#54A24B", width=2),
-        fill="tozeroy",
-        fillcolor="rgba(84,162,75,0.15)",
-    )
+    scenarios = [
+        ("Conservative (Lifetime)", rate_life, "#F58518", "dash"),
+        ("Moderate (90-day)", rate_90d, "#4C78A8", "dot"),
+        ("Optimistic (30-day)", rate_30d, "#54A24B", "solid"),
+    ]
+    for name, rate, color, dash in scenarios:
+        fig.add_scatter(
+            x=future_dates,
+            y=current_qualifying + rate * future_days,
+            name=name,
+            mode="lines",
+            line=dict(color=color, width=2, dash=dash),
+        )
     fig.add_hline(
         y=_YPP_WATCH_HOURS_THRESHOLD,
         line=dict(color="#E45756", width=2, dash="dash"),
         annotation_text="YPP 3,000 hr threshold",
         annotation_position="top left",
     )
-    for days in milestones:
+    for days in [30, 90, 180, 365]:
         fig.add_vline(
-            x=str(today + __import__("datetime").timedelta(days=days)),
-            line=dict(color="rgba(255,255,255,0.2)", width=1, dash="dot"),
+            x=str(today + _dt.timedelta(days=days)),
+            line=dict(color="rgba(255,255,255,0.15)", width=1, dash="dot"),
         )
     fig.update_layout(
-        title="Projected Qualifying Watch Hours (Next 365 Days)",
+        title="Projected Qualifying Watch Hours — Three Scenarios",
         xaxis_title="Date",
         yaxis_title="Cumulative Qualifying Hours",
-        height=360,
+        height=400,
         hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
     st.plotly_chart(fig, use_container_width=True)
     st.caption(
-        "Projection assumes constant qualifying rate from last 30 days. "
-        "Actual hours depend on future promotion spend and organic growth. "
-        "Excludes Shorts watch time (not counted by YouTube for YPP)."
+        f"Current qualifying hours: **{current_qualifying:,.0f} hrs** (total {current_total:,.0f} hrs × "
+        f"{qual_ratio * 100:.0f}% qualifying ratio). All scenarios assume constant promotion spend and "
+        f"content cadence. Excludes Shorts (not counted by YouTube for YPP)."
     )
 
 
