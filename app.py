@@ -722,9 +722,17 @@ with _eng_tab3:
         }).copy()
         tbl_eng["Watch Hours"] = tbl_eng["Watch Hours"].round(1)
         st.dataframe(
-            tbl_eng.style.background_gradient(subset=["Watch Rate %", "Like Rate %"], cmap="RdYlGn"),
+            tbl_eng,
             use_container_width=True,
             hide_index=True,
+            column_config={
+                "Watch Rate %": st.column_config.ProgressColumn(
+                    "Watch Rate %", min_value=0, max_value=100, format="%.1f%%"
+                ),
+                "Like Rate %": st.column_config.ProgressColumn(
+                    "Like Rate %", min_value=0, max_value=tbl_eng["Like Rate %"].max() or 1, format="%.2f%%"
+                ),
+            },
         )
         st.caption(
             f"{len(tbl_eng)} videos · Avg watch rate {_avg_watch:.1f}% · Avg like rate {_avg_like:.2f}% · "
