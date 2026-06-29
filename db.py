@@ -127,6 +127,24 @@ CREATE TABLE IF NOT EXISTS video_traffic_source_metrics (
 );
 CREATE INDEX IF NOT EXISTS idx_vtsm_video_date
     ON video_traffic_source_metrics(video_id, metric_date);
+
+CREATE TABLE IF NOT EXISTS video_ctr_metrics (
+    metric_date  TEXT NOT NULL,
+    video_id     TEXT NOT NULL,
+    impressions  INTEGER,
+    views        INTEGER,
+    ctr          REAL,
+    PRIMARY KEY (metric_date, video_id)
+);
+CREATE INDEX IF NOT EXISTS idx_vctr_video_date
+    ON video_ctr_metrics(video_id, metric_date);
+
+CREATE TABLE IF NOT EXISTS daily_channel_ctr (
+    metric_date  TEXT PRIMARY KEY,
+    impressions  INTEGER,
+    views        INTEGER,
+    ctr          REAL
+);
 """
 
 

@@ -282,6 +282,55 @@ def fetch_video_traffic_source_metrics(
     return results
 
 
+def fetch_video_ctr_metrics(start: date, end: date, channel_id: str | None = None) -> list[dict]:
+    """Fetch impressions, views, and CTR per video for the date range."""
+    yt = analytics_service()
+    ids = f"channel=={channel_id}" if channel_id else "channel==MINE"
+    resp = yt.reports().query(
+        ids=ids,
+        startDate=start.isoformat(),
+        endDate=end.isoformat(),
+        metrics="impressions,impressionClickThroughRate,views",
+        dimensions="video",
+        maxResults=200,
+        sort="-impressions",
+    ).execute()
+    rows = resp.get("rows", [])
+    return [
+        {
+            "metric_date": end.isoformat(),
+            "video_id": r[0],
+            "impressions": int(r[1]),
+            "ctr": float(r[2]),
+            "views": int(r[3]),
+        }
+        for r in rows
+    ]
+
+
+def fetch_daily_ctr_metrics(start: date, end: date, channel_id: str | None = None) -> list[dict]:
+    """Fetch channel-level daily impressions, views, and CTR."""
+    yt = analytics_service()
+    ids = f"channel=={channel_id}" if channel_id else "channel==MINE"
+    resp = yt.reports().query(
+        ids=ids,
+        startDate=start.isoformat(),
+        endDate=end.isoformat(),
+        metrics="impressions,impressionClickThroughRate,views",
+        dimensions="day",
+    ).execute()
+    rows = resp.get("rows", [])
+    return [
+        {
+            "metric_date": r[0],
+            "impressions": int(r[1]),
+            "ctr": float(r[2]),
+            "views": int(r[3]),
+        }
+        for r in rows
+    ]
+
+
 def fetch_daily_geo_metrics(start: date, end: date, channel_id: str | None = None) -> list[dict]:
     """Fetch aggregate views, subscribers_gained, and likes broken down by country.
 
