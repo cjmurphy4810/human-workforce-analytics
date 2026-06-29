@@ -616,6 +616,11 @@ with _eng_tab2:
     else:
         veng = video_engagement.copy()
         veng["title_short"] = veng["title"].fillna(veng["video_id"]).str[:50]
+        # Disambiguate duplicate labels — Plotly stacks bars sharing the same x-category
+        _dup = veng.duplicated(subset=["title_short"], keep=False)
+        veng.loc[_dup, "title_short"] = (
+            veng.loc[_dup, "title_short"] + " [" + veng.loc[_dup, "video_id"].str[:6] + "]"
+        )
         _dur = veng["duration_seconds"].replace(0, float("nan"))
         veng["watch_rate"] = (
             veng["average_view_duration"] / _dur * 100
