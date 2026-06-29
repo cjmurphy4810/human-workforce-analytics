@@ -622,28 +622,50 @@ with _eng_tab2:
         veng["like_rate"] = (veng["likes"] / veng["views"].clip(lower=1) * 100).round(2)
         veng["sub_rate"] = (veng["subscribers_gained"] / veng["views"].clip(lower=1) * 100).round(3)
 
-        _rank_by = st.selectbox(
+        _fc1, _fc2, _fc3 = st.columns([2, 1, 1])
+        _rank_by = _fc1.selectbox(
             "Rank by", ["Watch Rate %", "Views", "Like Rate %", "Subscriber Rate %"],
             key="eng_rank"
         )
+        _seg_n = _fc2.selectbox("Show", [10, 30, 50], index=1, key="eng_seg_n")
+        _segment = _fc3.selectbox("Segment", ["Top", "Bottom", "Middle"], key="eng_segment")
+
         _rank_col_map = {
             "Watch Rate %": "watch_rate",
             "Views": "views",
             "Like Rate %": "like_rate",
             "Subscriber Rate %": "sub_rate",
         }
-        veng_sorted = veng.sort_values(_rank_col_map[_rank_by], ascending=False).reset_index(drop=True)
+        _rank_metric = _rank_col_map[_rank_by]
+        veng_sorted = veng.sort_values(_rank_metric, ascending=False).reset_index(drop=True)
 
-        # Channel averages for reference lines
+        # Channel-wide averages (full dataset, before slicing)
         _avg_watch = veng_sorted["watch_rate"].mean()
         _avg_like = veng_sorted["like_rate"].mean()
-        _rank_metric = _rank_col_map[_rank_by]
         _avg_val = veng_sorted[_rank_metric].mean()
-        _y_vals = veng_sorted[_rank_metric]
+
+        # Slice to the requested segment
+        _total = len(veng_sorted)
+        _n = min(_seg_n, _total)
+        if _segment == "Top":
+            veng_slice = veng_sorted.iloc[:_n]
+        elif _segment == "Bottom":
+            veng_slice = veng_sorted.iloc[max(_total - _n, 0):]
+        else:  # Middle
+            _mid = _total // 2
+            _half = _n // 2
+            veng_slice = veng_sorted.iloc[max(_mid - _half, 0): _mid - _half + _n]
+
+        st.caption(
+            f"Showing {_segment} {len(veng_slice)} of {_total} videos ranked by {_rank_by}. "
+            "Average reference line reflects all videos."
+        )
+
+        _y_vals = veng_slice[_rank_metric]
         _colors = ["#54A24B" if v >= _avg_val else "#E45756" for v in _y_vals]
 
         fig_eng = go.Figure(go.Bar(
-            x=veng_sorted["title_short"],
+            x=veng_slice["title_short"],
             y=_y_vals,
             marker_color=_colors,
             hovertemplate=(
@@ -653,32 +675,33 @@ with _eng_tab2:
                 "Watch Rate: %{customdata[1]:.1f}%<br>"
                 "Like Rate: %{customdata[2]:.2f}%<extra></extra>"
             ),
-            customdata=veng_sorted[["views", "watch_rate", "like_rate"]].values,
+            customdata=veng_slice[["views", "watch_rate", "like_rate"]].values,
         ))
         fig_eng.add_hline(
             y=_avg_val,
             line=dict(color="#F58518", width=1.5, dash="dash"),
-            annotation_text=f"Avg {_avg_val:.2f}",
+            annotation_text=f"All-video avg {_avg_val:.2f}",
             annotation_position="top right",
         )
+        _bar_height = max(360, 240 + _n * 12)
         fig_eng.update_layout(
-            title=f"Videos Ranked by {_rank_by} (green = above average)",
+            title=f"{_segment} {len(veng_slice)} Videos by {_rank_by} (green = above avg)",
             xaxis_title="Video",
             yaxis_title=_rank_by,
-            height=440,
+            height=_bar_height,
             xaxis_tickangle=-45,
         )
         st.plotly_chart(fig_eng, use_container_width=True)
 
-        # Scatter: views vs watch rate — reveals high-reach vs high-retention tradeoff
+        # Scatter uses the same slice so labels stay readable
         fig_scat = go.Figure(go.Scatter(
-            x=veng_sorted["views"],
-            y=veng_sorted["watch_rate"],
+            x=veng_slice["views"],
+            y=veng_slice["watch_rate"],
             mode="markers",
-            text=veng_sorted["title_short"],
+            text=veng_slice["title_short"],
             marker=dict(
-                size=veng_sorted["like_rate"].clip(lower=0.01) * 8 + 6,
-                color=veng_sorted["watch_rate"],
+                size=veng_slice["like_rate"].clip(lower=0.01) * 8 + 6,
+                color=veng_slice["watch_rate"],
                 colorscale="RdYlGn",
                 showscale=True,
                 colorbar=dict(title="Watch %"),
@@ -691,10 +714,12 @@ with _eng_tab2:
                 "Bubble size ∝ Like Rate<extra></extra>"
             ),
         ))
-        fig_scat.add_vline(x=veng_sorted["views"].median(), line=dict(color="#aaa", dash="dot"))
-        fig_scat.add_hline(y=_avg_watch, line=dict(color="#aaa", dash="dot"))
+        fig_scat.add_vline(x=veng_slice["views"].median(), line=dict(color="#aaa", dash="dot"))
+        fig_scat.add_hline(y=_avg_watch, line=dict(color="#aaa", dash="dot"),
+                            annotation_text=f"All-video avg watch {_avg_watch:.1f}%",
+                            annotation_position="top right")
         fig_scat.update_layout(
-            title="Views vs Watch Rate — bubble size = like rate",
+            title=f"Views vs Watch Rate — {_segment} {len(veng_slice)} videos — bubble size = like rate",
             xaxis_title="Views (90-day window)",
             yaxis_title="Watch Rate %",
             height=480,
@@ -735,8 +760,8 @@ with _eng_tab3:
             },
         )
         st.caption(
-            f"{len(tbl_eng)} videos · Avg watch rate {_avg_watch:.1f}% · Avg like rate {_avg_like:.2f}% · "
-            "Watch Rate = avg view duration ÷ video length. Data: most recent 90-day fetch per video."
+            f"All {len(tbl_eng)} videos · Avg watch rate {_avg_watch:.1f}% · Avg like rate {_avg_like:.2f}% · "
+            "Watch Rate = avg view duration ÷ video length. Use the Video Engagement tab to filter Top/Bottom/Middle segments."
         )
 
 
