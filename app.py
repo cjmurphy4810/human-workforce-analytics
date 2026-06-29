@@ -616,9 +616,10 @@ with _eng_tab2:
     else:
         veng = video_engagement.copy()
         veng["title_short"] = veng["title"].fillna(veng["video_id"]).str[:50]
+        _dur = veng["duration_seconds"].replace(0, float("nan"))
         veng["watch_rate"] = (
-            veng["average_view_duration"] / veng["duration_seconds"].clip(lower=1) * 100
-        ).clip(upper=100).round(1)
+            veng["average_view_duration"] / _dur * 100
+        ).clip(upper=100).fillna(0.0).round(1)
         veng["like_rate"] = (veng["likes"] / veng["views"].clip(lower=1) * 100).round(2)
         veng["sub_rate"] = (veng["subscribers_gained"] / veng["views"].clip(lower=1) * 100).round(3)
 
