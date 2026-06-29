@@ -419,17 +419,29 @@ if not daily_channel.empty:
     hours["hours_watched"] = hours["estimated_minutes_watched"] / 60
     hours["cumulative_hours"] = hours["hours_watched"].cumsum()
 
-    # Qualifying ratio: use real per-video ADVERTISING data from the DB.
-    # Fall back to demo data only when the DB has no videos yet.
+    # Qualifying ratio: total - ADVERTISING watch hours, both from per-video DB snapshots.
+    # Use direct SQL so we don't import the heavy QWH module on every render.
     try:
-        from pages.qualifying_watch_hours import _build_real_metrics as _qwh_real, _build_demo_metrics as _qwh_demo
-        from analytics.qualifying_hours import compute_qualifying_hours as _compute_qh
-        _dm = _qwh_real(DB_PATH)
-        if not _dm:
-            _dm = _qwh_demo()
-        _report = _compute_qh(_dm)
-        _total_wh = sum(m.total_watch_hours for m in _dm)
-        _qual_ratio = _report.estimated_qualifying_hours / max(_total_wh, 1)
+        with sqlite3.connect(str(DB_PATH)) as _c:
+            _total_wh = _c.execute(
+                "SELECT SUM(d.estimated_minutes_watched/60.0) "
+                "FROM daily_video_metrics d "
+                "INNER JOIN ("
+                "  SELECT video_id, MAX(metric_date) AS latest_date "
+                "  FROM daily_video_metrics GROUP BY video_id"
+                ") latest ON d.video_id=latest.video_id AND d.metric_date=latest.latest_date"
+            ).fetchone()[0] or 0.0
+            _adv_wh = _c.execute(
+                "SELECT SUM(d.estimated_minutes_watched/60.0) "
+                "FROM video_traffic_source_metrics d "
+                "INNER JOIN ("
+                "  SELECT video_id, MAX(metric_date) AS latest_date "
+                "  FROM video_traffic_source_metrics "
+                "  WHERE traffic_source_type='ADVERTISING' GROUP BY video_id"
+                ") latest ON d.video_id=latest.video_id AND d.metric_date=latest.latest_date "
+                "WHERE d.traffic_source_type='ADVERTISING'"
+            ).fetchone()[0] or 0.0
+        _qual_ratio = max(_total_wh - _adv_wh, 0.0) / max(_total_wh, 1.0)
         _promo_ratio = 1.0 - _qual_ratio
     except Exception:
         _qual_ratio = 1.0
