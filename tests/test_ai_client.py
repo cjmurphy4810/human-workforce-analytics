@@ -1,9 +1,7 @@
 import json
 from unittest.mock import MagicMock, patch
 
-import pytest
 
-import ai_client
 from ai_client import classify_video_themes, fetch_news_headlines, rank_videos_by_news
 
 

@@ -1,354 +1,307 @@
-"""Content Intelligence — Streamlit multipage page.
+"""Content Intelligence — Streamlit dashboard page (Phase 1).
 
-Identifies winning videos and generates draft community/social assets
-for human review and approval. Nothing is auto-published.
+Five panels:
+  1. Top Episodes          — ranked by composite score
+  2. Subscriber Magnets   — highest viewer-to-subscriber conversion
+  3. Hidden Gems          — loved content that hasn't been discovered yet
+  4. Repackaging Opps     — good content held back by a weak thumbnail/title
+  5. Draft Asset Library  — review and approve drafted content assets
+
+Uses ContentIntelligenceService backed by the existing analytics SQLite DB.
+No LLM generation, no auto-publishing in Phase 1.
 """
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-import anthropic
 import pandas as pd
 import streamlit as st
 
-from content_intelligence.models import (
-    ASSET_TYPE_LABELS,
-    TIER_LABELS,
-    AssetType,
-    VideoScore,
-)
+from content_intelligence.models import CLASSIFICATION_ACTIONS
 from content_intelligence.service import (
+    ContentIntelligenceService,
     load_assets,
-    load_scores,
-    run_scoring,
-    save_asset,
     update_asset_status,
 )
-from content_intelligence.generation.drafts import generate_asset
 from db import DB_PATH
 
 st.set_page_config(page_title="Content Intelligence", layout="wide")
 
+_DB = Path(DB_PATH)
+_SVC = ContentIntelligenceService(_DB)
 
-# ── helpers ───────────────────────────────────────────────────────────────────
+# ── Classification display map ────────────────────────────────────────────────
 
-def _ai_client() -> anthropic.Anthropic | None:
-    try:
-        key = st.secrets.get("ANTHROPIC_API_KEY", "") or ""
-        if not key:
-            import os
-            key = os.environ.get("ANTHROPIC_API_KEY", "")
-        return anthropic.Anthropic(api_key=key) if key else None
-    except Exception:
-        return None
+_CLS_LABELS: dict[str, str] = {
+    "subscriber_magnet": "🧲 Subscriber Magnet",
+    "hidden_gem": "💎 Hidden Gem",
+    "high_engagement": "🔥 High Engagement",
+    "evergreen_candidate": "🌿 Evergreen",
+    "needs_repackaging": "🎨 Needs Repackaging",
+    "high_watch_time": "⏱ High Watch Time",
+    "low_ctr_opportunity": "📈 Low CTR Opportunity",
+}
+
+
+# ── Cached data loading ───────────────────────────────────────────────────────
 
 
 @st.cache_data(ttl=300)
-def _scores_cached(db_path: str) -> list[dict]:
-    return load_scores(Path(db_path))
+def _load_scored_library() -> tuple[list[dict], dict[str, dict]]:
+    """Return (ranked episode dicts, snapshot dict map) from one DB query."""
+    episodes, snapshots = _SVC._load_episodes_and_snapshots()
+    ranked = _SVC._scorer.rank_episodes(list(episodes), snapshots)
+    snap_map = {s.episode_id: s.model_dump() for s in snapshots}
+    return [ep.model_dump() for ep in ranked], snap_map
 
 
 @st.cache_data(ttl=300)
-def _assets_cached(db_path: str, asset_type: str = "", status: str = "", video_id: str = "") -> list[dict]:
-    return load_assets(
-        Path(db_path),
-        asset_type=asset_type or None,
-        status=status or None,
-        video_id=video_id or None,
+def _load_asset_library() -> list[dict]:
+    return load_assets(_DB)
+
+
+# ── Row helpers ───────────────────────────────────────────────────────────────
+
+
+def _as_row(ep: dict, snap_map: dict[str, dict]) -> dict:
+    snap = snap_map.get(ep["id"], {})
+    cls = ep.get("classifications") or []
+    actions = [CLASSIFICATION_ACTIONS[c] for c in cls if c in CLASSIFICATION_ACTIONS]
+    return {
+        "title": ep["title"],
+        "score": round(ep.get("score") or 0.0, 1),
+        "views": snap.get("views", 0),
+        "watch_hours": round(snap.get("watch_hours", 0.0), 1),
+        "ctr": snap.get("ctr", 0.0),
+        "subscribers_gained": snap.get("subscribers_gained", 0),
+        "avg_pct_viewed": round(snap.get("average_percentage_viewed", 0.0), 1),
+        "classifications": cls,
+        "recommended_action": " · ".join(actions) or "Monitor performance trends.",
+        "youtube_video_id": ep["youtube_video_id"],
+    }
+
+
+def _filter_by_cls(rows: list[dict], label: str) -> list[dict]:
+    return [r for r in rows if label in r["classifications"]]
+
+
+# ── Rendering helpers ─────────────────────────────────────────────────────────
+
+
+def _episode_table(rows: list[dict]) -> None:
+    if not rows:
+        return
+    df = pd.DataFrame(rows)
+    display = df[["title", "score", "views", "watch_hours", "subscribers_gained", "avg_pct_viewed"]].copy()
+    display.columns = ["Title", "Score", "Views", "Watch Hrs", "Subs Gained", "Avg Watched %"]
+    st.dataframe(
+        display,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Score": st.column_config.ProgressColumn(
+                "Score", min_value=0, max_value=100, format="%.0f"
+            ),
+        },
     )
 
 
-def _to_df(scores: list[dict]) -> pd.DataFrame:
-    if not scores:
-        return pd.DataFrame()
-    df = pd.DataFrame(scores)
-    df["tier_label"] = df["tier"].map(TIER_LABELS)
-    df["promo_pct"] = (df["promotion_ratio"] * 100).round(1)
-    return df
+def _episode_cards(rows: list[dict]) -> None:
+    for row in rows:
+        icon = "🏆" if row["score"] >= 70 else ("⚡" if row["score"] >= 40 else "📊")
+        with st.expander(f"{icon} **{row['title']}** — Score: {row['score']:.0f}/100"):
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric("Score", f"{row['score']:.0f}/100")
+            c2.metric("Views", f"{row['views']:,}")
+            c3.metric("Watch Hours", f"{row['watch_hours']:.0f} h")
+            c4.metric("Subs Gained", f"{row['subscribers_gained']:,}")
+            c5.metric("Avg Watched", f"{row['avg_pct_viewed']:.0f}%")
+
+            if row["classifications"]:
+                badges = " · ".join(
+                    _CLS_LABELS.get(c, c) for c in row["classifications"]
+                )
+                st.markdown(f"**Labels:** {badges}")
+
+            if row["recommended_action"]:
+                st.info(f"**Recommended action:** {row['recommended_action']}", icon="💡")
+
+            st.caption(f"Video ID: `{row['youtube_video_id']}`")
 
 
-def _score_cards(row: pd.Series) -> None:
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Overall", f"{row['overall_score']:.0f}/100")
-    c2.metric("Engagement", f"{row['engagement_score']:.0f}/100")
-    c3.metric("Evergreen", f"{row['evergreen_score']:.0f}/100")
-    c4.metric("Sub Magnet", f"{row['subscriber_magnet_score']:.0f}/100")
-    c5.metric("Hidden Gem", f"{row['hidden_gem_score']:.0f}/100")
+def _panel(rows: list[dict], empty_msg: str) -> None:
+    if not rows:
+        st.info(empty_msg, icon="ℹ️")
+        return
+    st.markdown(f"**{len(rows)} episodes identified**")
+    view, cards = st.tabs(["Table", "Cards"])
+    with view:
+        _episode_table(rows)
+    with cards:
+        _episode_cards(rows)
 
 
-def _asset_tile(asset: dict, db_path: Path) -> None:
-    with st.expander(f"{asset['title']}  ·  `{asset['status']}`", expanded=False):
-        body = asset["body"]
-        if asset["asset_type"] == "poll":
-            try:
-                p = json.loads(body)
-                st.markdown(f"**{p['question']}**")
-                for opt in p.get("options", []):
-                    st.markdown(f"- {opt}")
-            except (json.JSONDecodeError, KeyError):
-                st.code(body)
-        elif asset["asset_type"] == "course_idea":
-            try:
-                c = json.loads(body)
-                st.markdown(f"### {c.get('course_title', '')}")
-                st.caption(f"Audience: {c.get('target_audience', '')} · {c.get('estimated_duration', '')}")
-                for m in c.get("modules", []):
-                    st.markdown(f"**{m['title']}** — {m['description']}")
-            except (json.JSONDecodeError, KeyError):
-                st.code(body)
-        else:
-            st.markdown(body)
-
+def _asset_tile(asset: dict) -> None:
+    key_id = asset.get("asset_id") or asset.get("id", "")
+    with st.expander(f"{asset.get('title', '—')}  ·  `{asset.get('status', 'draft')}`"):
+        body = asset.get("body") or asset.get("content") or ""
+        st.markdown(body)
         st.divider()
-        ca, cr, cn = st.columns([1, 1, 4])
-        status = asset["status"]
-
+        ca, cr = st.columns(2)
+        status = asset.get("status", "draft")
         if status == "draft":
-            if ca.button("Approve", key=f"approve_{asset['asset_id']}"):
+            if ca.button("Approve", key=f"appr_{key_id}"):
                 update_asset_status(
-                    db_path, asset["asset_id"], "approved",
+                    _DB, key_id, "approved",
                     approved_at=datetime.now(timezone.utc).isoformat(),
                 )
                 st.cache_data.clear()
                 st.rerun()
-            if cr.button("Reject", key=f"reject_{asset['asset_id']}"):
-                update_asset_status(db_path, asset["asset_id"], "rejected")
+            if cr.button("Reject", key=f"rejt_{key_id}"):
+                update_asset_status(_DB, key_id, "rejected")
                 st.cache_data.clear()
                 st.rerun()
         elif status == "approved":
-            if ca.button("Published", key=f"publish_{asset['asset_id']}"):
-                update_asset_status(db_path, asset["asset_id"], "published")
+            if ca.button("Mark Published", key=f"pub_{key_id}"):
+                update_asset_status(_DB, key_id, "published")
                 st.cache_data.clear()
                 st.rerun()
-            if cr.button("Revoke", key=f"revoke_{asset['asset_id']}"):
-                update_asset_status(db_path, asset["asset_id"], "draft")
+            if cr.button("Revoke", key=f"rev_{key_id}"):
+                update_asset_status(_DB, key_id, "draft")
                 st.cache_data.clear()
                 st.rerun()
 
-        new_notes = cn.text_input(
-            "Notes", value=asset.get("notes") or "",
-            key=f"notes_{asset['asset_id']}",
-            placeholder="Reviewer notes…",
-        )
-        if new_notes != (asset.get("notes") or ""):
-            update_asset_status(db_path, asset["asset_id"], status, notes=new_notes)
-            st.cache_data.clear()
 
-
-def _gen_section(scores_df: pd.DataFrame, asset_type: AssetType, client: anthropic.Anthropic | None, db_path: Path) -> None:
-    if scores_df.empty:
-        st.info("Run scoring first.", icon="ℹ️")
-        return
-    options = scores_df.sort_values("overall_score", ascending=False).drop_duplicates("video_id")
-    titles = options["title"].tolist()
-    selected_title = st.selectbox("Video", titles, key=f"sel_{asset_type}")
-    selected_id = options[options["title"] == selected_title]["video_id"].iloc[0]
-    selected_row = options[options["video_id"] == selected_id].iloc[0]
-
-    if st.button(f"Generate {ASSET_TYPE_LABELS[asset_type]}", key=f"gen_{asset_type}", type="primary"):
-        if not client:
-            st.error("ANTHROPIC_API_KEY not configured.", icon="🔑")
-        else:
-            vs = VideoScore(
-                video_id=selected_row["video_id"],
-                title=selected_row.get("title", selected_title),
-                scored_at=selected_row.get("scored_at", ""),
-                total_views=int(selected_row.get("total_views", 0)),
-                watch_rate_pct=float(selected_row.get("watch_rate_pct", 0)),
-                like_rate_pct=float(selected_row.get("like_rate_pct", 0)),
-                sub_rate_pct=float(selected_row.get("sub_rate_pct", 0)),
-                promotion_ratio=float(selected_row.get("promotion_ratio", 0)),
-                engagement_score=float(selected_row.get("engagement_score", 0)),
-                evergreen_score=float(selected_row.get("evergreen_score", 0)),
-                subscriber_magnet_score=float(selected_row.get("subscriber_magnet_score", 0)),
-                hidden_gem_score=float(selected_row.get("hidden_gem_score", 0)),
-                overall_score=float(selected_row.get("overall_score", 0)),
-                tier=selected_row.get("tier", "average"),
-            )
-            with st.spinner(f"Generating {ASSET_TYPE_LABELS[asset_type]}…"):
-                try:
-                    asset = generate_asset(client, vs, asset_type)
-                    save_asset(db_path, asset)
-                    st.cache_data.clear()
-                    st.success("Draft saved — see Asset Library or Approval Queue.")
-                except Exception as exc:
-                    st.error(f"Generation failed: {exc}")
-
-    st.divider()
-    st.markdown(f"**Saved {ASSET_TYPE_LABELS[asset_type]} drafts for this video**")
-    saved = load_assets(db_path, asset_type=asset_type, video_id=selected_id)
-    if not saved:
-        st.caption("No drafts yet.")
-    else:
-        for a in saved:
-            _asset_tile(a, db_path)
-
-
-# ── page ──────────────────────────────────────────────────────────────────────
+# ── Page ──────────────────────────────────────────────────────────────────────
 
 st.title("Content Intelligence")
 st.caption(
-    "Identifies winning videos using existing analytics data and generates "
-    "draft content assets for human review. Nothing is auto-published."
+    "Identifies winning episodes from existing analytics data. "
+    "Phase 1: scoring, classification, and draft asset review. "
+    "No auto-publishing."
 )
 
-_db_path = Path(DB_PATH)
-_client = _ai_client()
+# Load data once; all panels derive from this
+_all_eps, _snap_map = _load_scored_library()
+_rows = [_as_row(ep, _snap_map) for ep in _all_eps]
 
-if not _client:
-    st.sidebar.warning("ANTHROPIC_API_KEY not set — generation disabled.", icon="🔑")
-
-with st.sidebar:
-    st.header("Controls")
-    if st.button("Run Scoring Now", type="primary", use_container_width=True):
-        with st.spinner("Scoring all videos…"):
-            try:
-                _scored = run_scoring(_db_path)
-                st.cache_data.clear()
-                st.success(f"Scored {len(_scored)} videos.")
-            except Exception as _e:
-                st.error(f"Scoring failed: {_e}")
-    st.caption("Reads existing analytics data — no new YouTube API calls.")
-
-_scores = _scores_cached(str(_db_path))
-_df = _to_df(_scores)
-
-if _df.empty:
-    st.info("No scores yet. Click **Run Scoring Now** in the sidebar to analyse your video catalog.", icon="ℹ️")
+if not _rows:
+    st.info(
+        "No analytics data found. Trigger a fetch via GitHub Actions (workflow_dispatch) "
+        "or run `python fetch_metrics.py` locally to populate metrics.",
+        icon="ℹ️",
+    )
     st.stop()
 
-_scored_date = _scores[0].get("scored_at", "—") if _scores else "—"
-st.caption(f"Latest scores: {_scored_date}  ·  {len(_scores)} videos")
+st.caption(f"{len(_rows)} videos scored")
 
-(
-    _t_top, _t_mag, _t_gem,
-    _t_lib, _t_com, _t_pol,
-    _t_qte, _t_hok, _t_lin,
-    _t_crs, _t_apq,
-) = st.tabs([
-    "Top Episodes", "Subscriber Magnets", "Hidden Gems",
-    "Asset Library", "Community Posts", "Polls",
-    "Quote Cards", "Short Hooks", "LinkedIn Posts",
-    "Course Ideas", "Approval Queue",
+tab_top, tab_mag, tab_gem, tab_repkg, tab_lib = st.tabs([
+    "🏆 Top Episodes",
+    "🧲 Subscriber Magnets",
+    "💎 Hidden Gems",
+    "🎨 Repackaging Opportunities",
+    "📁 Draft Asset Library",
 ])
 
-# Top Episodes
-with _t_top:
+# ── 1. Top Episodes ───────────────────────────────────────────────────────────
+with tab_top:
     st.subheader("Top Episodes")
-    st.caption("Highest overall score AND above-median views — your best-performing content.")
-    _top = _df[_df["tier"] == "top_episode"].sort_values("overall_score", ascending=False)
-    if _top.empty:
-        st.info("No top episodes identified yet.", icon="ℹ️")
-    else:
-        for _, _row in _top.iterrows():
-            with st.expander(f"🏆 {_row['title']}", expanded=False):
-                _score_cards(_row)
-                st.caption(
-                    f"Views: {int(_row['total_views']):,}  ·  "
-                    f"Watch Rate: {_row['watch_rate_pct']:.1f}%  ·  "
-                    f"Like Rate: {_row['like_rate_pct']:.2f}%  ·  "
-                    f"Promo: {_row['promo_pct']:.0f}%"
-                )
+    st.caption(
+        "Ranked by composite score (watch rate, subscriber conversion, watch hours, "
+        "engagement, and viewer return rate). A higher score means more valuable content."
+    )
+    _n = st.slider("Show top N", min_value=5, max_value=50, value=20, step=5)
+    _panel(
+        _rows[:_n],
+        "No analytics data — run a fetch to populate metrics.",
+    )
 
-# Subscriber Magnets
-with _t_mag:
+# ── 2. Subscriber Magnets ─────────────────────────────────────────────────────
+with tab_mag:
     st.subheader("Subscriber Magnets")
-    st.caption("Top subscriber conversion rate relative to organic views.")
-    _mag = _df[_df["tier"] == "subscriber_magnet"].sort_values("subscriber_magnet_score", ascending=False)
-    if _mag.empty:
-        st.info("No subscriber magnets identified.", icon="ℹ️")
-    else:
-        for _, _row in _mag.iterrows():
-            with st.expander(f"🧲 {_row['title']}", expanded=False):
-                _score_cards(_row)
-                st.caption(
-                    f"Sub Rate: {_row['sub_rate_pct']:.3f}%  ·  "
-                    f"Organic: {(1 - _row['promotion_ratio']) * 100:.0f}%  ·  "
-                    f"Views: {int(_row['total_views']):,}"
-                )
+    st.caption(
+        "Episodes where ≥2% of viewers subscribed after watching. "
+        "Feature these in playlists, end-screens, and community posts."
+    )
+    _panel(
+        _filter_by_cls(_rows, "subscriber_magnet"),
+        "No subscriber magnets identified yet. "
+        "This requires at least one video with ≥2 subscriber conversions per 100 views.",
+    )
 
-# Hidden Gems
-with _t_gem:
+# ── 3. Hidden Gems ────────────────────────────────────────────────────────────
+with tab_gem:
     st.subheader("Hidden Gems")
-    st.caption("High engagement but under-promoted — candidates for organic resharing.")
-    _gem = _df[_df["tier"] == "hidden_gem"].sort_values("hidden_gem_score", ascending=False)
-    if _gem.empty:
-        st.info("No hidden gems identified.", icon="ℹ️")
-    else:
-        for _, _row in _gem.iterrows():
-            with st.expander(f"💎 {_row['title']}", expanded=False):
-                _score_cards(_row)
-                st.caption(
-                    f"Views: {int(_row['total_views']):,}  ·  "
-                    f"Engagement: {_row['engagement_score']:.0f}/100  ·  "
-                    f"Promo: {_row['promo_pct']:.0f}%"
-                )
+    st.caption(
+        "Episodes with high viewer retention (≥50% average watched) but low impressions. "
+        "Viewers love this content — it just hasn't been discovered. Promote it."
+    )
+    _panel(
+        _filter_by_cls(_rows, "hidden_gem"),
+        "No hidden gems found. "
+        "Either all high-retention videos already have high impression counts, "
+        "or analytics data needs refreshing.",
+    )
 
-# Asset Library
-with _t_lib:
-    st.subheader("Asset Library")
-    _all = load_assets(_db_path)
-    if not _all:
-        st.info("No assets yet. Use the asset tabs to generate drafts.", icon="ℹ️")
+# ── 4. Repackaging Opportunities ─────────────────────────────────────────────
+with tab_repkg:
+    st.subheader("Repackaging Opportunities")
+    st.caption(
+        "Episodes where viewers who click **stay and watch** (≥50% average watched) "
+        "but CTR is below 3%. The content is strong — the thumbnail or title is not "
+        "driving enough clicks."
+    )
+    _panel(
+        _filter_by_cls(_rows, "needs_repackaging"),
+        "No repackaging opportunities identified. "
+        "This panel requires CTR data — the YouTube Analytics API v2 does not expose "
+        "impression CTR for channel reports, so all episodes are currently excluded.",
+    )
+
+# ── 5. Draft Asset Library ────────────────────────────────────────────────────
+with tab_lib:
+    st.subheader("Draft Asset Library")
+    st.caption(
+        "Content assets awaiting review. "
+        "Phase 2 will auto-generate drafts from episode transcripts. "
+        "Assets added manually will appear here."
+    )
+    _assets = _load_asset_library()
+    if not _assets:
+        st.info(
+            "No assets yet. Asset generation (Phase 2) will populate this library "
+            "with community posts, polls, quote cards, and more.",
+            icon="ℹ️",
+        )
     else:
-        _lf1, _lf2 = st.columns(2)
-        _ftype = _lf1.selectbox("Filter by type", ["All"] + list(ASSET_TYPE_LABELS.values()), key="lib_ftype")
-        _fstat = _lf2.selectbox("Filter by status", ["All", "draft", "approved", "rejected", "published"], key="lib_fstat")
-        _ftype_key = next((k for k, v in ASSET_TYPE_LABELS.items() if v == _ftype), None)
-        _filtered = [
-            a for a in _all
-            if (_ftype == "All" or a["asset_type"] == _ftype_key)
-            and (_fstat == "All" or a["status"] == _fstat)
+        _f1, _f2 = st.columns(2)
+        _fstat = _f1.selectbox(
+            "Status",
+            ["All", "draft", "approved", "rejected", "published"],
+            key="lib_status",
+        )
+        _ftype = _f2.selectbox(
+            "Type",
+            ["All"] + sorted({a.get("asset_type", "") for a in _assets if a.get("asset_type")}),
+            key="lib_type",
+        )
+
+        _filtered_assets = [
+            a for a in _assets
+            if (_fstat == "All" or a.get("status") == _fstat)
+            and (_ftype == "All" or a.get("asset_type") == _ftype)
         ]
-        _stat_counts = pd.Series([a["status"] for a in _all]).value_counts()
-        _lk1, _lk2, _lk3, _lk4 = st.columns(4)
-        _lk1.metric("Total", len(_all))
-        _lk2.metric("Drafts", _stat_counts.get("draft", 0))
-        _lk3.metric("Approved", _stat_counts.get("approved", 0))
-        _lk4.metric("Published", _stat_counts.get("published", 0))
+
+        _counts = pd.Series([a.get("status", "draft") for a in _assets]).value_counts()
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Total Assets", len(_assets))
+        m2.metric("Drafts", _counts.get("draft", 0))
+        m3.metric("Approved", _counts.get("approved", 0))
+        m4.metric("Published", _counts.get("published", 0))
+
         st.divider()
-        for _a in _filtered:
-            _asset_tile(_a, _db_path)
-
-# Generation tabs
-with _t_com:
-    st.subheader("Community Posts")
-    _gen_section(_df, "community_post", _client, _db_path)
-
-with _t_pol:
-    st.subheader("Polls")
-    _gen_section(_df, "poll", _client, _db_path)
-
-with _t_qte:
-    st.subheader("Quote Cards")
-    _gen_section(_df, "quote_card", _client, _db_path)
-
-with _t_hok:
-    st.subheader("Short Hooks")
-    _gen_section(_df, "short_hook", _client, _db_path)
-
-with _t_lin:
-    st.subheader("LinkedIn Posts")
-    _gen_section(_df, "linkedin_post", _client, _db_path)
-
-with _t_crs:
-    st.subheader("Course Ideas")
-    _gen_section(_df, "course_idea", _client, _db_path)
-
-# Approval Queue
-with _t_apq:
-    st.subheader("Approval Queue")
-    st.caption("All draft assets awaiting review.")
-    _drafts = load_assets(_db_path, status="draft")
-    if not _drafts:
-        st.success("Inbox zero — no pending drafts.", icon="✅")
-    else:
-        _by_type: dict[str, list] = {}
-        for _a in _drafts:
-            _by_type.setdefault(_a["asset_type"], []).append(_a)
-        for _atype, _items in sorted(_by_type.items()):
-            st.markdown(f"**{ASSET_TYPE_LABELS.get(_atype, _atype)}** ({len(_items)} pending)")
-            for _a in _items:
-                _asset_tile(_a, _db_path)
+        if not _filtered_assets:
+            st.caption("No assets match the selected filters.")
+        for _a in _filtered_assets:
+            _asset_tile(_a)

@@ -1,11 +1,17 @@
-"""Tests for content_intelligence.service persistence functions."""
+"""Tests for ContentIntelligenceService and backward-compat service functions."""
+from __future__ import annotations
+
 import sqlite3
 import tempfile
 from datetime import date
 from pathlib import Path
 
-from content_intelligence.models import ContentAsset, VideoScore
+from content_intelligence.models import (
+    Episode,
+    LegacyContentAsset,
+)
 from content_intelligence.service import (
+    ContentIntelligenceService,
     load_assets,
     load_scores,
     run_scoring,
@@ -14,7 +20,10 @@ from content_intelligence.service import (
 )
 
 
-def _make_db(tmp: str) -> Path:
+# ── DB helpers ────────────────────────────────────────────────────────────────
+
+
+def _make_db(tmp: str, seed_metrics: bool = True) -> Path:
     db_path = Path(tmp) / "test.db"
     with sqlite3.connect(str(db_path)) as conn:
         conn.executescript("""
@@ -54,27 +63,178 @@ def _make_db(tmp: str) -> Path:
             );
         """)
         conn.execute(
-            "INSERT INTO videos(video_id, title, duration_seconds) VALUES (?,?,?)",
-            ("v1", "Test Video", 600),
+            "INSERT INTO videos(video_id, title, duration_seconds, published_at) VALUES (?,?,?,?)",
+            ("v1", "Test Video One", 600, "2026-01-01T00:00:00Z"),
         )
         conn.execute(
-            "INSERT INTO daily_video_metrics(metric_date, video_id, views, "
-            "estimated_minutes_watched, average_view_duration, likes, subscribers_gained) "
-            "VALUES (?,?,?,?,?,?,?)",
-            ("2026-06-29", "v1", 500, 2000, 240, 25, 5),
+            "INSERT INTO videos(video_id, title, duration_seconds, published_at) VALUES (?,?,?,?)",
+            ("v2", "Test Video Two", 300, "2026-02-01T00:00:00Z"),
         )
+        if seed_metrics:
+            conn.execute(
+                "INSERT INTO daily_video_metrics(metric_date, video_id, views, "
+                "estimated_minutes_watched, average_view_duration, likes, subscribers_gained) "
+                "VALUES (?,?,?,?,?,?,?)",
+                ("2026-06-29", "v1", 1000, 5000, 300, 50, 20),
+            )
+            conn.execute(
+                "INSERT INTO daily_video_metrics(metric_date, video_id, views, "
+                "estimated_minutes_watched, average_view_duration, likes, subscribers_gained) "
+                "VALUES (?,?,?,?,?,?,?)",
+                ("2026-06-29", "v2", 100, 300, 150, 5, 1),
+            )
         conn.commit()
     return db_path
+
+
+def _legacy_asset(asset_id: str, video_id: str = "v1", atype: str = "community_post") -> LegacyContentAsset:
+    return LegacyContentAsset(
+        asset_id=asset_id,
+        video_id=video_id,
+        video_title="Test Video",
+        asset_type=atype,
+        title=f"{atype}: Test Video",
+        body="Some content here.",
+        generated_at="2026-06-29T00:00:00Z",
+    )
+
+
+# ── ContentIntelligenceService ────────────────────────────────────────────────
+
+
+def test_service_load_episodes_and_snapshots():
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = _make_db(tmp)
+        svc = ContentIntelligenceService(db_path)
+        episodes, snapshots = svc._load_episodes_and_snapshots()
+        assert len(episodes) == 2
+        # Only videos with views > 0 get snapshots
+        assert len(snapshots) == 2
+
+
+def test_service_load_episodes_empty_metrics():
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = _make_db(tmp, seed_metrics=False)
+        svc = ContentIntelligenceService(db_path)
+        episodes, snapshots = svc._load_episodes_and_snapshots()
+        assert len(episodes) == 2
+        assert len(snapshots) == 0
+
+
+def test_service_score_content_library_returns_ranked():
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = _make_db(tmp)
+        svc = ContentIntelligenceService(db_path)
+        ranked = svc.score_content_library()
+        assert len(ranked) == 2
+        # Higher-performing video should rank first
+        assert ranked[0].score is not None
+        assert ranked[0].score >= (ranked[1].score or 0.0)
+
+
+def test_service_score_content_library_sets_episode_id_to_video_id():
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = _make_db(tmp)
+        svc = ContentIntelligenceService(db_path)
+        ranked = svc.score_content_library()
+        video_ids = {ep.youtube_video_id for ep in ranked}
+        assert "v1" in video_ids
+        assert "v2" in video_ids
+
+
+def test_service_get_top_episodes():
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = _make_db(tmp)
+        svc = ContentIntelligenceService(db_path)
+        top = svc.get_top_episodes(n=1)
+        assert len(top) == 1
+
+
+def test_service_get_top_episodes_no_metrics_all_scores_zero():
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = _make_db(tmp, seed_metrics=False)
+        svc = ContentIntelligenceService(db_path)
+        top = svc.get_top_episodes()
+        # Returns episodes but all scores are 0 (no analytics data)
+        assert all(ep.score == 0.0 for ep in top)
+
+
+def test_service_get_subscriber_magnets_returns_episodes():
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = _make_db(tmp)
+        svc = ContentIntelligenceService(db_path)
+        # v1 has 1000 views and 20 subs → 2% sub rate → exactly at threshold
+        magnets = svc.get_subscriber_magnets()
+        assert isinstance(magnets, list)
+        # v1 should qualify (20/1000 = 2%)
+        ids = {ep.youtube_video_id for ep in magnets}
+        assert "v1" in ids
+
+
+def test_service_get_hidden_gems_returns_list():
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = _make_db(tmp)
+        svc = ContentIntelligenceService(db_path)
+        gems = svc.get_hidden_gems()
+        assert isinstance(gems, list)
+
+
+def test_service_get_repackaging_opportunities_empty_when_no_ctr():
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = _make_db(tmp)
+        svc = ContentIntelligenceService(db_path)
+        # No CTR data available in this DB — should return empty
+        opps = svc.get_repackaging_opportunities()
+        assert opps == []
+
+
+def test_service_create_asset_draft():
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = _make_db(tmp)
+        svc = ContentIntelligenceService(db_path)
+        ep = Episode(id="ep1", youtube_video_id="v1", title="Test")
+        from content_intelligence.models import AssetStatus, AssetType
+        asset = svc.create_asset_draft(
+            episode=ep,
+            asset_type=AssetType.community_post,
+            title="Post",
+            content="Hello world",
+        )
+        assert asset.status == AssetStatus.draft
+        assert asset.episode_id == "ep1"
+        assert asset.content == "Hello world"
+
+
+def test_service_get_recommended_action_no_classifications():
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = _make_db(tmp)
+        svc = ContentIntelligenceService(db_path)
+        ep = Episode(youtube_video_id="v1", title="Test")
+        action = svc.get_recommended_action(ep)
+        assert isinstance(action, str)
+        assert len(action) > 0
+
+
+def test_service_get_recommended_action_with_classifications():
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = _make_db(tmp)
+        svc = ContentIntelligenceService(db_path)
+        ep = Episode(youtube_video_id="v1", title="Test",
+                     classifications=["subscriber_magnet", "high_watch_time"])
+        action = svc.get_recommended_action(ep)
+        assert "·" in action  # multiple actions joined with separator
+
+
+# ── Backward-compat: run_scoring / load_scores ────────────────────────────────
 
 
 def test_run_scoring_persists_to_db():
     with tempfile.TemporaryDirectory() as tmp:
         db_path = _make_db(tmp)
         scores = run_scoring(db_path, date(2026, 6, 29))
-        assert len(scores) == 1
+        assert len(scores) == 2
         rows = load_scores(db_path, date(2026, 6, 29))
-        assert len(rows) == 1
-        assert rows[0]["video_id"] == "v1"
+        assert len(rows) == 2
 
 
 def test_run_scoring_upsert_idempotent():
@@ -83,77 +243,93 @@ def test_run_scoring_upsert_idempotent():
         run_scoring(db_path, date(2026, 6, 29))
         run_scoring(db_path, date(2026, 6, 29))
         rows = load_scores(db_path, date(2026, 6, 29))
-        assert len(rows) == 1
+        assert len(rows) == 2
+
+
+def test_run_scoring_empty_metrics():
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = _make_db(tmp, seed_metrics=False)
+        scores = run_scoring(db_path)
+        assert scores == []
+
+
+def test_load_scores_without_date_returns_latest():
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = _make_db(tmp)
+        run_scoring(db_path, date(2026, 6, 29))
+        rows = load_scores(db_path)
+        assert len(rows) == 2
+        assert all(r["scored_at"] == "2026-06-29" for r in rows)
+
+
+# ── Backward-compat: save_asset / update_asset_status / load_assets ──────────
 
 
 def test_save_asset_and_load():
     with tempfile.TemporaryDirectory() as tmp:
         db_path = _make_db(tmp)
-        asset = ContentAsset(
-            asset_id="test123", video_id="v1", video_title="Test Video",
-            asset_type="community_post", title="Post: Test Video",
-            body="Hello world", generated_at="2026-06-29T00:00:00Z",
-        )
-        save_asset(db_path, asset)
+        save_asset(db_path, _legacy_asset("a1"))
         rows = load_assets(db_path)
         assert len(rows) == 1
-        assert rows[0]["asset_id"] == "test123"
+        assert rows[0]["asset_id"] == "a1"
         assert rows[0]["status"] == "draft"
 
 
-def test_update_asset_status_changes_status():
+def test_save_asset_upsert_idempotent():
     with tempfile.TemporaryDirectory() as tmp:
         db_path = _make_db(tmp)
-        asset = ContentAsset(
-            asset_id="test456", video_id="v1", video_title="Test",
-            asset_type="poll", title="Poll: Test",
-            body='{"question": "Q?", "options": ["A", "B", "C", "D"]}',
-            generated_at="2026-06-29T00:00:00Z",
-        )
+        asset = _legacy_asset("a2")
         save_asset(db_path, asset)
-        update_asset_status(db_path, "test456", "approved", approved_at="2026-06-29T01:00:00Z")
+        save_asset(db_path, asset)
+        rows = load_assets(db_path)
+        assert len(rows) == 1
+
+
+def test_update_asset_status_approved():
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = _make_db(tmp)
+        save_asset(db_path, _legacy_asset("a3"))
+        update_asset_status(db_path, "a3", "approved", approved_at="2026-06-29T10:00:00Z")
         rows = load_assets(db_path)
         assert rows[0]["status"] == "approved"
-        assert rows[0]["approved_at"] == "2026-06-29T01:00:00Z"
-
-
-def test_load_assets_filter_by_type():
-    with tempfile.TemporaryDirectory() as tmp:
-        db_path = _make_db(tmp)
-        for i, atype in enumerate(("community_post", "poll", "quote_card")):
-            save_asset(db_path, ContentAsset(
-                asset_id=f"a{i}", video_id="v1", video_title="T",
-                asset_type=atype, title=f"{atype} title",
-                body="body", generated_at="2026-06-29T00:00:00Z",
-            ))
-        polls = load_assets(db_path, asset_type="poll")
-        assert len(polls) == 1
-        assert polls[0]["asset_type"] == "poll"
-
-
-def test_load_assets_filter_by_status():
-    with tempfile.TemporaryDirectory() as tmp:
-        db_path = _make_db(tmp)
-        save_asset(db_path, ContentAsset(
-            asset_id="x1", video_id="v1", video_title="T",
-            asset_type="community_post", title="P",
-            body="body", generated_at="2026-06-29T00:00:00Z",
-        ))
-        update_asset_status(db_path, "x1", "approved")
-        drafts = load_assets(db_path, status="draft")
-        approved = load_assets(db_path, status="approved")
-        assert len(drafts) == 0
-        assert len(approved) == 1
+        assert rows[0]["approved_at"] == "2026-06-29T10:00:00Z"
 
 
 def test_update_asset_notes():
     with tempfile.TemporaryDirectory() as tmp:
         db_path = _make_db(tmp)
-        save_asset(db_path, ContentAsset(
-            asset_id="n1", video_id="v1", video_title="T",
-            asset_type="quote_card", title="Q",
-            body="body", generated_at="2026-06-29T00:00:00Z",
-        ))
-        update_asset_status(db_path, "n1", "draft", notes="Needs revision")
+        save_asset(db_path, _legacy_asset("a4"))
+        update_asset_status(db_path, "a4", "draft", notes="Needs revision")
         rows = load_assets(db_path)
         assert rows[0]["notes"] == "Needs revision"
+
+
+def test_load_assets_filter_by_type():
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = _make_db(tmp)
+        for i, atype in enumerate(("community_post", "quote_card", "community_post")):
+            save_asset(db_path, _legacy_asset(f"a{i}", atype=atype))
+        posts = load_assets(db_path, asset_type="community_post")
+        assert len(posts) == 2
+
+
+def test_load_assets_filter_by_status():
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = _make_db(tmp)
+        save_asset(db_path, _legacy_asset("a5"))
+        update_asset_status(db_path, "a5", "approved")
+        save_asset(db_path, _legacy_asset("a6"))
+        drafts = load_assets(db_path, status="draft")
+        approved = load_assets(db_path, status="approved")
+        assert len(drafts) == 1
+        assert len(approved) == 1
+
+
+def test_load_assets_filter_by_video_id():
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = _make_db(tmp)
+        save_asset(db_path, _legacy_asset("a7", video_id="v1"))
+        save_asset(db_path, _legacy_asset("a8", video_id="v2"))
+        v1_assets = load_assets(db_path, video_id="v1")
+        assert all(r["video_id"] == "v1" for r in v1_assets)
+        assert len(v1_assets) == 1

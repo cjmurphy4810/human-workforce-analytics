@@ -3,9 +3,7 @@ import sqlite3
 import tempfile
 from datetime import date
 from pathlib import Path
-from unittest.mock import patch
 
-import pytest
 
 from content_intelligence.scoring.engine import _classify_tier, _percentile_rank, score_videos
 

@@ -263,19 +263,16 @@ def _build_real_metrics(db_path: Path) -> list[VideoPromotionMetrics]:
         if has_api_data and pd.notna(row.get("advertising_watch_hours")):
             # API_ACTUAL: ADVERTISING minutes directly from insightTrafficSourceType
             promo_views = int(row.get("advertising_views") or 0)
-            promo_wh_direct = float(row["advertising_watch_hours"])
             avg_promo_dur = float(row.get("avg_advertising_view_duration") or avg_dur)
             data_source = "API_ACTUAL"
         elif has_api_data:
             # Video had no ADVERTISING traffic in the period — truly zero promotion
             promo_views = 0
-            promo_wh_direct = 0.0
             avg_promo_dur = 0.0
             data_source = "API_ACTUAL"
         else:
             # No traffic source data yet — will populate on next fetch
             promo_views = 0
-            promo_wh_direct = 0.0
             avg_promo_dur = 0.0
             data_source = "NONE"
 

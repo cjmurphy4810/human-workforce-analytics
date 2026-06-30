@@ -6,8 +6,9 @@ import uuid
 from datetime import datetime, timezone
 
 import anthropic
+from anthropic.types import TextBlock
 
-from content_intelligence.models import AssetType, ContentAsset, VideoScore
+from content_intelligence.models import AssetType, LegacyContentAsset, VideoScore
 from content_intelligence.prompts.templates import SYSTEM_PROMPT, TEMPLATES
 
 
@@ -16,7 +17,7 @@ def generate_asset(
     video: VideoScore,
     asset_type: AssetType,
     channel_name: str = "",
-) -> ContentAsset:
+) -> LegacyContentAsset:
     """
     Generate one draft ContentAsset for the given video and asset type.
 
@@ -42,7 +43,10 @@ def generate_asset(
         messages=[{"role": "user", "content": prompt}],
     )
 
-    raw = response.content[0].text.strip()
+    block = response.content[0]
+    if not isinstance(block, TextBlock):
+        raise ValueError(f"Unexpected response block type: {type(block)}")
+    raw = block.text.strip()
     if raw.startswith("```"):
         lines = raw.split("\n")
         inner = lines[1:-1] if lines[-1].strip() == "```" else lines[1:]
@@ -55,7 +59,7 @@ def generate_asset(
             raw = raw[start : end + 1]
         json.loads(raw)  # validate; raises ValueError on bad JSON
 
-    return ContentAsset(
+    return LegacyContentAsset(
         asset_id=uuid.uuid4().hex,
         video_id=video.video_id,
         video_title=video.title,

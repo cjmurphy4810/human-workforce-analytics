@@ -3,9 +3,10 @@ import json
 from unittest.mock import MagicMock
 
 import pytest
+from anthropic.types import TextBlock
 
 from content_intelligence.generation.drafts import _make_title, generate_asset
-from content_intelligence.models import ContentAsset, VideoScore
+from content_intelligence.models import LegacyContentAsset, VideoScore
 
 
 def _video_score(**kwargs) -> VideoScore:
@@ -24,7 +25,7 @@ def _video_score(**kwargs) -> VideoScore:
 def _mock_client(response_text: str) -> MagicMock:
     client = MagicMock()
     client.messages.create.return_value = MagicMock(
-        content=[MagicMock(text=response_text)]
+        content=[TextBlock(type="text", text=response_text)]
     )
     return client
 
@@ -33,7 +34,7 @@ def test_generate_community_post_returns_asset():
     client = _mock_client("Great post text here about the future of work.")
     vs = _video_score()
     asset = generate_asset(client, vs, "community_post")
-    assert isinstance(asset, ContentAsset)
+    assert isinstance(asset, LegacyContentAsset)
     assert asset.asset_type == "community_post"
     assert asset.status == "draft"
     assert asset.video_id == "v1"
