@@ -194,6 +194,9 @@ def main() -> None:
 
     end = date.today()
     start = end - timedelta(days=90)
+    # Use lifetime window for per-video aggregates so subscribersGained reflects
+    # all-time contribution per video, not just the rolling 90-day window.
+    video_start = date(2005, 1, 1)
     print(f"Fetching daily channel metrics {start} -> {end}...")
     try:
         daily_channel = fetch_daily_channel_metrics(start, end, channel_id)
@@ -201,9 +204,9 @@ def main() -> None:
         print(f"  daily channel metrics failed ({e.__class__.__name__}), skipping.")
         daily_channel = []
 
-    print(f"Fetching per-video totals {start} -> {end}...")
+    print(f"Fetching per-video totals {video_start} -> {end}...")
     try:
-        daily_video = fetch_video_period_metrics(start, end, channel_id)
+        daily_video = fetch_video_period_metrics(video_start, end, channel_id)
     except Exception as e:
         print(f"  per-video totals failed ({e.__class__.__name__}), skipping.")
         daily_video = []
