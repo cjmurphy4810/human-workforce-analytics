@@ -763,20 +763,18 @@ with tab_viz:
 
         # ── Scatter: Promotion Cost vs Qualifying Hours ───────────────────
         st.subheader("Scatter — Promotion Cost vs Qualifying Hours")
-        st.caption("Size = Views Per Day.  Higher right = more qualifying hours per dollar spent.")
+        st.caption("Size = Views Per Day.  Higher right = more qualifying hours per dollar spent.  Hover for title.")
         fig_scatter = px.scatter(
             viz_df,
             x="Promo Cost ($)",
             y="Qualifying Hours",
             color="Classification",
             size="Views Per Day",
-            text="Title",
             hover_name="Title",
             hover_data=["Score", "Retention %", "PES"],
             color_discrete_map=color_map,
             size_max=40,
         )
-        fig_scatter.update_traces(textposition="top center", textfont_size=9)
         fig_scatter.update_layout(height=480, legend={"orientation": "h", "y": -0.25})
         st.plotly_chart(fig_scatter, use_container_width=True)
 
@@ -817,23 +815,31 @@ with tab_viz:
         # ── Bubble: Subscribers × Qualifying Hours (size = Follow-on Views) ──
         st.subheader("Bubble — Subscribers × Qualifying Hours")
         st.caption(
-            "Bubble size = Follow-on Views.  "
-            "Ideal promotions are upper-right with large bubbles."
+            "Bubble size = Follow-on Views.  Color = classification.  "
+            "Ideal promotions are upper-right with large bubbles.  Hover for title."
         )
+        # Label only the top 5 by score so the chart stays readable
+        top5_titles = set(
+            viz_df.nlargest(5, "Score")["Title"].tolist()
+        )
+        viz_df["Label"] = viz_df["Title"].where(viz_df["Title"].isin(top5_titles), "")
         fig_bubble = px.scatter(
             viz_df,
             x="Subscribers Gained",
             y="Qualifying Hours",
             size="Follow-on Views",
-            color="Promo Cost ($)",
+            color="Classification",
+            color_discrete_map=color_map,
             hover_name="Title",
-            hover_data=["Score", "Classification", "PES"],
-            color_continuous_scale="RdYlGn_r",
-            size_max=60,
-            text="Title",
+            hover_data=["Score", "Subscribers Gained", "Qualifying Hours", "PES"],
+            size_max=50,
+            text="Label",
         )
-        fig_bubble.update_traces(textposition="top center", textfont_size=8)
-        fig_bubble.update_layout(height=500, coloraxis_colorbar={"title": "Promo Cost $"})
+        fig_bubble.update_traces(textposition="top center", textfont_size=9)
+        fig_bubble.update_layout(
+            height=520,
+            legend={"orientation": "h", "y": -0.2},
+        )
         st.plotly_chart(fig_bubble, use_container_width=True)
 
 # ═══════════════════════════════════════════════════════════════════════════════
