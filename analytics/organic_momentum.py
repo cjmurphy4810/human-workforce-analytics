@@ -304,6 +304,11 @@ def _compute_growth_stats(db_path: str) -> pd.DataFrame:
         view_gr = calculate_growth_rate(s_mean, f_mean)
         wh_gr = calculate_growth_rate(s_wh, f_wh)
 
+        # Cap to [-1.0, 5.0] — a 10× growth is already exceptional;
+        # uncapped values explode when early deltas are near 0 (new videos)
+        view_gr = max(-1.0, min(5.0, view_gr))
+        wh_gr = max(-1.0, min(5.0, wh_gr))
+
         records.append({
             "video_id": str(vid),
             "view_growth_rate": view_gr,
@@ -408,7 +413,8 @@ def build_momentum_data(db_path: str) -> list[OrganicMomentumMetrics]:
         post_promo_organic = int(organic_views * organic_retention_factor)
         post_promo_wh = qualifying_wh * organic_retention_factor
 
-        avg_pct = (avg_dur / max(length_s, 1)) * 100.0 if length_s > 0 else 0.0
+        # Cap at 100 — Shorts stored with length_s=0 or 1 would otherwise explode
+        avg_pct = min((avg_dur / max(length_s, 1)) * 100.0, 100.0) if length_s >= 5 else 0.0
 
         # Lift metrics relative to promotion cost (unavailable without Ads data)
         organic_lift = float(organic_views) / max(adv_views, 1) if adv_views > 0 else 0.0

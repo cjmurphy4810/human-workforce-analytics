@@ -784,10 +784,17 @@ with tab_charts:
                 "Title": m.title[:45] + "…" if len(m.title) > 45 else m.title,
                 "Score": round(m.organic_momentum_score, 1),
                 "Classification": m.classification.value,
-                "Completion %": round(m.average_percentage_viewed, 1),
+                "Organic Ratio %": round(
+                    m.organic_views / max(m.total_views, 1) * 100, 1
+                ),
+                "Completion %": min(round(m.average_percentage_viewed, 1), 105.0),
                 "Avg Duration (s)": round(m.average_view_duration_seconds),
-                "Post-Promo Watch Hrs": round(m.post_promotion_organic_watch_hours, 1),
-                "Qualifying Hrs": round(m.estimated_qualifying_watch_hours, 1),
+                "Post-Promo Watch Hrs": max(
+                    round(m.post_promotion_organic_watch_hours, 1), 0.0
+                ),
+                "Qualifying Hrs": max(
+                    round(m.estimated_qualifying_watch_hours, 1), 0.0
+                ),
                 "Total Views": m.total_views,
                 "Organic Views": m.organic_views,
                 "Subscribers": m.subscribers,
@@ -799,27 +806,32 @@ with tab_charts:
         ])
         color_map = {cls.value: color for cls, color in MOMENTUM_CLASS_COLOR.items()}
 
-        # ── Chart 1: Completion % vs Avg View Duration ──────────────────────
-        st.subheader("Completion Rate vs Average View Duration")
-        st.caption("Hover for title · color = classification")
-        top5_titles = set(viz_df.nlargest(5, "Score")["Title"].tolist())
-        viz_df["Label"] = viz_df["Title"].where(viz_df["Title"].isin(top5_titles), "")
-
+        # ── Chart 1: Organic Ratio vs Momentum Score ─────────────────────────
+        st.subheader("Organic Traffic Ratio vs Momentum Score")
+        st.caption(
+            "Right = more traffic comes from organic sources · "
+            "Up = higher score · size = total views · hover for details"
+        )
         fig_c1 = px.scatter(
             viz_df,
-            x="Avg Duration (s)",
-            y="Completion %",
+            x="Organic Ratio %",
+            y="Score",
             color="Classification",
             size="Total Views",
             size_max=35,
             hover_name="Title",
-            hover_data=["Score", "Completion %", "Avg Duration (s)"],
+            hover_data=["Organic Views", "Completion %", "View Growth %"],
             color_discrete_map=color_map,
-            text="Label",
             height=440,
         )
-        fig_c1.update_traces(textposition="top center", textfont_size=9)
-        fig_c1.update_layout(legend={"orientation": "h", "y": -0.2})
+        fig_c1.add_vline(
+            x=50, line_dash="dot", line_color="rgba(255,255,255,0.25)"
+        )
+        fig_c1.update_layout(
+            xaxis={"range": [-5, 105], "title": "Organic Traffic Ratio (%)"},
+            yaxis={"range": [-2, 102], "title": "Momentum Score (0–100)"},
+            legend={"orientation": "h", "y": -0.22},
+        )
         st.plotly_chart(fig_c1, use_container_width=True)
 
         c2left, c2right = st.columns(2)
@@ -827,6 +839,7 @@ with tab_charts:
         with c2left:
             # ── Chart 2: Organic Views vs Qualifying Hours ──────────────────
             st.subheader("Organic Views vs Qualifying Hours")
+            st.caption("Size = subscriber count · hover for details")
             fig_c2 = px.scatter(
                 viz_df,
                 x="Organic Views",
@@ -839,12 +852,16 @@ with tab_charts:
                 color_discrete_map=color_map,
                 height=380,
             )
-            fig_c2.update_layout(showlegend=False)
+            fig_c2.update_layout(
+                showlegend=False,
+                yaxis={"rangemode": "tozero"},
+            )
             st.plotly_chart(fig_c2, use_container_width=True)
 
         with c2right:
-            # ── Chart 3: View Growth vs Score ───────────────────────────────
+            # ── Chart 3: View Growth vs Score ────────────────────────────────
             st.subheader("View Growth vs Momentum Score")
+            st.caption("Positive X = growing · hover for details")
             fig_c3 = px.scatter(
                 viz_df,
                 x="View Growth %",
@@ -858,37 +875,36 @@ with tab_charts:
                 height=380,
             )
             fig_c3.add_vline(x=0, line_dash="dash", line_color="rgba(255,255,255,0.3)")
-            fig_c3.update_layout(showlegend=False)
+            fig_c3.update_layout(
+                showlegend=False,
+                yaxis={"range": [-2, 102]},
+            )
             st.plotly_chart(fig_c3, use_container_width=True)
 
-        # ── Chart 4: Bubble — Completion % × Qualifying Hours × Post-Promo WH ──
-        st.subheader("Bubble — Completion Rate × Qualifying Hours")
+        # ── Chart 4: Bubble — Score × Qualifying Hours × Organic Views ───────
+        st.subheader("Momentum Score × Qualifying Watch Hours")
         st.caption(
-            "Bubble size = Post-Promotion Watch Hours.  "
-            "Upper-right with large bubbles = ideal content.  Hover for title."
+            "Bubble size = organic views.  "
+            "Upper-right with large bubbles = high-scoring, YPP-contributing content.  "
+            "Hover for title."
         )
-        bubble_df = viz_df[viz_df["Post-Promo Watch Hrs"] > 0].copy()
-        if bubble_df.empty:
-            bubble_df = viz_df.copy()
-        bubble_df["Bubble Size"] = (bubble_df["Post-Promo Watch Hrs"] + 1).clip(lower=1)
-        top5b = set(bubble_df.nlargest(5, "Score")["Title"].tolist())
-        bubble_df["BLabel"] = bubble_df["Title"].where(bubble_df["Title"].isin(top5b), "")
-
+        bubble_df = viz_df.copy()
+        bubble_df["Bubble Size"] = (bubble_df["Organic Views"] + 1).clip(lower=1)
         fig_bubble = px.scatter(
             bubble_df,
-            x="Completion %",
+            x="Score",
             y="Qualifying Hrs",
             size="Bubble Size",
             color="Classification",
             color_discrete_map=color_map,
             hover_name="Title",
-            hover_data=["Score", "Post-Promo Watch Hrs", "View Growth %"],
+            hover_data=["Completion %", "View Growth %", "Organic Ratio %"],
             size_max=55,
-            text="BLabel",
-            height=500,
+            height=480,
         )
-        fig_bubble.update_traces(textposition="top center", textfont_size=9)
         fig_bubble.update_layout(
+            xaxis={"range": [-2, 102], "title": "Momentum Score (0–100)"},
+            yaxis={"rangemode": "tozero", "title": "Qualifying Watch Hours"},
             legend={"orientation": "h", "y": -0.18},
         )
         st.plotly_chart(fig_bubble, use_container_width=True)
