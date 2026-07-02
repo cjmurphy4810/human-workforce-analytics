@@ -339,10 +339,15 @@ def build_momentum_data(db_path: str) -> list[OrganicMomentumMetrics]:
     """)
 
     adv = _db_query(db_path, """
-        SELECT video_id, SUM(views) AS adv_views
-        FROM video_traffic_source_metrics
-        WHERE traffic_source_type = 'ADVERTISING'
-        GROUP BY video_id
+        SELECT d.video_id, d.views AS adv_views
+        FROM video_traffic_source_metrics d
+        INNER JOIN (
+            SELECT video_id, MAX(metric_date) AS latest_date
+            FROM video_traffic_source_metrics
+            WHERE traffic_source_type = 'ADVERTISING'
+            GROUP BY video_id
+        ) lx ON d.video_id = lx.video_id AND d.metric_date = lx.latest_date
+        WHERE d.traffic_source_type = 'ADVERTISING'
     """)
 
     growth = _compute_growth_stats(db_path)
