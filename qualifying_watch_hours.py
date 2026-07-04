@@ -27,6 +27,7 @@ from models.promotion import VideoPromotionMetrics, make_metrics
 from services.google_ads import GoogleAdsCSVAdapter
 
 _YPP_WATCH_HOURS_THRESHOLD = 3_000
+_BONUS_THRESHOLD = 4_000  # 12-month growth target
 
 
 # ---------------------------------------------------------------------------
@@ -798,7 +799,7 @@ def _render_projections(db_path: Path, qual_ratio: float) -> None:
             icon="📈",
         )
 
-    # Scenario milestones
+    # Scenario milestones — 3,000 hr YPP threshold
     st.markdown("**Days to YPP threshold (3,000 hrs) by scenario**")
     mil1, mil2, mil3 = st.columns(3)
     for col, rate, label in [
@@ -812,6 +813,28 @@ def _render_projections(db_path: Path, qual_ratio: float) -> None:
             col.metric(label, "—")
         else:
             days_left = (_YPP_WATCH_HOURS_THRESHOLD - current_qualifying) / rate
+            target = today + _dt.timedelta(days=int(days_left))
+            col.metric(
+                label,
+                f"{int(days_left)} days",
+                delta=target.strftime("%b %d, %Y"),
+                delta_color="off",
+            )
+
+    # Scenario milestones — 4,000 hr 12-month growth target
+    st.markdown("**Days to 12-month target (4,000 hrs) by scenario**")
+    bon1, bon2, bon3 = st.columns(3)
+    for col, rate, label in [
+        (bon1, rate_life, "Conservative"),
+        (bon2, rate_90d, "Moderate"),
+        (bon3, rate_30d, "Optimistic"),
+    ]:
+        if current_qualifying >= _BONUS_THRESHOLD:
+            col.metric(label, "Already reached ✅")
+        elif rate <= 0:
+            col.metric(label, "—")
+        else:
+            days_left = (_BONUS_THRESHOLD - current_qualifying) / rate
             target = today + _dt.timedelta(days=int(days_left))
             col.metric(
                 label,
@@ -842,6 +865,12 @@ def _render_projections(db_path: Path, qual_ratio: float) -> None:
         y=_YPP_WATCH_HOURS_THRESHOLD,
         line=dict(color="#E45756", width=2, dash="dash"),
         annotation_text="YPP 3,000 hr threshold",
+        annotation_position="top left",
+    )
+    fig.add_hline(
+        y=_BONUS_THRESHOLD,
+        line=dict(color="#F58518", width=2, dash="dash"),
+        annotation_text="4,000 hr 12-month target",
         annotation_position="top left",
     )
     for days in [30, 90, 180, 365]:
@@ -970,6 +999,25 @@ def render(db_path: Path) -> None:
                 f"Est. qualifying = {total_365:,.0f} total − {adv_hours:,.0f} ADVERTISING = **{est_qualifying:,.0f} hrs** (API_ACTUAL). "
                 "May still include Shorts watch time. Verify in **YouTube Studio → Earn**."
             )
+
+            st.markdown("---")
+            st.markdown("**12-Month Growth Target: 4,000 hrs**")
+            bon_c1, bon_c2, bon_c3 = st.columns(3)
+            bon_c1.metric(
+                "Est. Qualifying Hours",
+                f"{est_qualifying:,.0f} hrs",
+            )
+            bon_c2.metric(
+                "12-Month Target",
+                f"{_BONUS_THRESHOLD:,} hrs",
+                help="Internal growth target: reach 4,000 qualifying watch hours to build a stronger catalog buffer above the YPP minimum.",
+            )
+            _gap_4k = max(_BONUS_THRESHOLD - est_qualifying, 0.0)
+            bon_c3.metric(
+                "Gap to Target",
+                f"{_gap_4k:,.0f} hrs remaining" if _gap_4k > 0 else "Target reached ✅",
+            )
+            st.progress(min(est_qualifying / _BONUS_THRESHOLD, 1.0))
         else:
             ypp_col1, ypp_col2, ypp_col3 = st.columns(3)
             ypp_col1.metric(
@@ -1000,6 +1048,22 @@ def render(db_path: Path) -> None:
                 "⚠ This total **includes Shorts** watch time. "
                 "For the exact YPP-eligible count, check **YouTube Studio → Earn**."
             )
+
+            st.markdown("---")
+            st.markdown("**12-Month Growth Target: 4,000 hrs**")
+            bon_c1, bon_c2, bon_c3 = st.columns(3)
+            bon_c1.metric("Total Watch Hours (DB)", f"{total_365:,.0f} hrs")
+            bon_c2.metric(
+                "12-Month Target",
+                f"{_BONUS_THRESHOLD:,} hrs",
+                help="Internal growth target: 4,000 qualifying watch hours within 12 months of channel launch.",
+            )
+            _gap_4k = max(_BONUS_THRESHOLD - total_365, 0.0)
+            bon_c3.metric(
+                "Gap to Target",
+                f"{_gap_4k:,.0f} hrs remaining" if _gap_4k > 0 else "Target reached ✅",
+            )
+            st.progress(min(total_365 / _BONUS_THRESHOLD, 1.0))
 
     # --- Sidebar filters ---
     all_campaigns = sorted({m.campaign for m in base_metrics if m.campaign})

@@ -55,9 +55,7 @@ with st.sidebar:
     )
 
 if _active_section == "Qualifying Watch Hours":
-    import qualifying_watch_hours as _qwh
-    _qwh.render(DB_PATH)
-    st.stop()
+    st.switch_page("pages/qualifying_watch_hours.py")
 
 
 @st.cache_data(ttl=300)
