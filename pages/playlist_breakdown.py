@@ -359,6 +359,15 @@ _default_shorts = _match(all_playlists, "shorts")
 _default_visual = _match(all_playlists, "visual podcast", "visual podcasts")
 _default_hd     = _match(all_playlists, "hq video", "hq videos", "hd video", "hd videos")
 
+# Force defaults whenever the detected set changes — clears stale session state
+# that was set before these playlists existed in the database.
+_defaults_sig = f"{_default_shorts}|{_default_visual}|{_default_hd}"
+if st.session_state.get("_cg_defaults_sig") != _defaults_sig:
+    st.session_state["cg_shorts"] = _default_shorts
+    st.session_state["cg_visual"] = _default_visual
+    st.session_state["cg_hd"]     = _default_hd
+    st.session_state["_cg_defaults_sig"] = _defaults_sig
+
 with st.expander("Configure content type groups", expanded=True):
     gc1, gc2, gc3 = st.columns(3)
     with gc1:
