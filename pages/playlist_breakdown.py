@@ -351,30 +351,38 @@ st.caption(
     "Totals are cumulative to date; per-video averages normalize for group size."
 )
 
+def _match(playlists: list[str], *keywords: str) -> list[str]:
+    kw_lower = [k.lower() for k in keywords]
+    return [p for p in playlists if any(k in p.lower() for k in kw_lower)]
+
+_default_shorts = _match(all_playlists, "shorts")
+_default_visual = _match(all_playlists, "visual podcast", "visual podcasts")
+_default_hd     = _match(all_playlists, "hq video", "hq videos", "hd video", "hd videos")
+
 with st.expander("Configure content type groups", expanded=True):
     gc1, gc2, gc3 = st.columns(3)
     with gc1:
         grp_shorts = st.multiselect(
             "🟡 Shorts",
             options=all_playlists,
-            default=[p for p in ["Shorts"] if p in all_playlists],
+            default=_default_shorts,
             key="cg_shorts",
         )
     with gc2:
         grp_visual = st.multiselect(
             "🔵 Visual Podcasts",
             options=all_playlists,
-            default=[],
+            default=_default_visual,
             key="cg_visual",
-            help="Select the playlists that contain visual podcast episodes.",
+            help="Auto-detects playlists named 'Visual Podcasts'. Select others as needed.",
         )
     with gc3:
         grp_hd = st.multiselect(
             "🟢 HD Videos",
             options=all_playlists,
-            default=[],
+            default=_default_hd,
             key="cg_hd",
-            help="Select the playlists that contain HD-produced videos.",
+            help="Auto-detects playlists named 'HQ Videos' or 'HD Videos'. Select others as needed.",
         )
     st.caption(
         "Priority order when a video appears in multiple assigned groups: "
