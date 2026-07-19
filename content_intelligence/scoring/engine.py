@@ -25,7 +25,7 @@ def _percentile_rank(values: list[float]) -> list[float]:
     return ranks
 
 
-def score_videos(db_path: Path, scored_at: date | None = None) -> list[VideoScore]:
+def score_videos(db_path: Path, channel: str, scored_at: date | None = None) -> list[VideoScore]:
     """
     Load the latest per-video snapshot from the DB and compute content scores.
 
@@ -33,6 +33,9 @@ def score_videos(db_path: Path, scored_at: date | None = None) -> list[VideoScor
         daily_video_metrics — views, avg_view_duration, likes, subscribers_gained
         videos              — duration_seconds, title, published_at
         video_traffic_source_metrics (ADVERTISING) — advertising views per video
+
+    All queries are scoped to `channel` so scores are never blended across
+    channels.
     """
     if scored_at is None:
         scored_at = date.today()
@@ -55,18 +58,22 @@ def score_videos(db_path: Path, scored_at: date | None = None) -> list[VideoScor
             INNER JOIN (
                 SELECT video_id, MAX(metric_date) AS latest_date
                 FROM daily_video_metrics
+                WHERE channel = :channel
                 GROUP BY video_id
             ) latest ON d.video_id = latest.video_id
                      AND d.metric_date = latest.latest_date
             LEFT JOIN videos v ON d.video_id = v.video_id
+                     AND v.channel = :channel
             LEFT JOIN (
                 SELECT video_id, SUM(views) AS adv_views
                 FROM video_traffic_source_metrics
                 WHERE traffic_source_type = 'ADVERTISING'
+                  AND channel = :channel
                 GROUP BY video_id
             ) adv ON d.video_id = adv.video_id
             WHERE d.views > 0
-        """).fetchall()
+              AND d.channel = :channel
+        """, {"channel": channel}).fetchall()
 
     if not rows:
         return []

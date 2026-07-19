@@ -214,7 +214,7 @@ class ContentIntelligenceService:
 
 def run_scoring(db_path: Path, channel: str, scored_at: date | None = None) -> list[VideoScore]:
     """Score all videos and upsert results to ci_video_scores (legacy path)."""
-    scores = score_videos(db_path, scored_at)
+    scores = score_videos(db_path, channel, scored_at)
     if not scores:
         return []
 
