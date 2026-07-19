@@ -5,6 +5,47 @@ from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
+from db import SCHEMA
+from fetch_metrics import CHANNEL_CONFIGS
+
+
+def test_channel_configs_cover_all_three_channels():
+    keys = {c["key"] for c in CHANNEL_CONFIGS}
+    assert keys == {"human_workforce", "club_genius", "kzak"}
+    for cfg in CHANNEL_CONFIGS:
+        assert cfg["channel_id_env"].startswith("YT_CHANNEL_ID_")
+        assert cfg["refresh_token_env"].startswith("YT_REFRESH_TOKEN_")
+
+
+def test_video_insert_is_tagged_with_channel(tmp_path, monkeypatch):
+    import db as db_module
+    test_db = tmp_path / "test.db"
+    monkeypatch.setattr(db_module, "DB_PATH", test_db)
+
+    conn = sqlite3.connect(test_db)
+    conn.executescript(SCHEMA)
+    conn.execute(
+        "INSERT INTO videos(channel, video_id, title) VALUES ('club_genius', 'v1', 'Test')"
+    )
+    conn.execute(
+        "INSERT INTO videos(channel, video_id, title) VALUES ('human_workforce', 'v1', 'Different Video, Same ID')"
+    )
+    conn.commit()
+
+    rows = conn.execute(
+        "SELECT channel, title FROM videos WHERE video_id='v1' ORDER BY channel"
+    ).fetchall()
+    assert rows == [
+        ("club_genius", "Different Video, Same ID"),
+        ("human_workforce", "Different Video, Same ID"),
+    ] or rows == [
+        ("club_genius", "Test"),
+        ("human_workforce", "Different Video, Same ID"),
+    ]
+    # The real assertion: both channel rows coexist without a PK collision.
+    assert len(rows) == 2
+    conn.close()
+
 
 def test_write_retention_rolling_windows_writes_three_rows_per_video():
     with tempfile.TemporaryDirectory() as tmp:
@@ -42,7 +83,7 @@ def test_write_retention_rolling_windows_writes_three_rows_per_video():
 
             with patch("fetch_metrics.fetch_retention_curve", side_effect=fake_curve), \
                  patch("fetch_metrics.fetch_video_views_in_window", return_value=42):
-                write_retention_rolling_windows(["v1", "v2"], today=date(2026, 5, 2))
+                write_retention_rolling_windows("human_workforce", ["v1", "v2"], today=date(2026, 5, 2))
 
             with sqlite3.connect(db_path) as conn:
                 rows = list(conn.execute(
@@ -70,7 +111,7 @@ def test_write_retention_rolling_windows_skips_when_curve_is_none():
 
             from fetch_metrics import write_retention_rolling_windows
             with patch("fetch_metrics.fetch_retention_curve", return_value=None):
-                write_retention_rolling_windows(["v1"], today=date(2026, 5, 2))
+                write_retention_rolling_windows("human_workforce", ["v1"], today=date(2026, 5, 2))
 
             with sqlite3.connect(db_path) as conn:
                 count = conn.execute(
@@ -90,7 +131,7 @@ def test_write_publishing_queue_skips_when_no_unpublished_videos():
             db_module.init_db()
             from fetch_metrics import write_publishing_queue
             with patch("fetch_metrics.classify_video_themes") as mock_classify:
-                write_publishing_queue([
+                write_publishing_queue("human_workforce", [
                     {"video_id": "v1", "privacy_status": "public", "title": "T", "description": "D"}
                 ])
                 mock_classify.assert_not_called()
@@ -105,7 +146,7 @@ def test_write_publishing_queue_skips_without_anthropic_key(monkeypatch):
             import db as db_module
             db_module.init_db()
             from fetch_metrics import write_publishing_queue
-            write_publishing_queue([
+            write_publishing_queue("human_workforce", [
                 {"video_id": "v1", "privacy_status": "private", "title": "T", "description": "D"}
             ])
             with sqlite3.connect(db_path) as conn:
@@ -127,7 +168,7 @@ def test_write_publishing_queue_writes_result_json(monkeypatch):
             with patch("fetch_metrics.classify_video_themes", return_value={"v1": "AI theme"}), \
                  patch("fetch_metrics.rank_videos_by_news", return_value=ranked), \
                  patch("fetch_metrics.anthropic.Anthropic"):
-                write_publishing_queue([
+                write_publishing_queue("human_workforce", [
                     {"video_id": "v1", "privacy_status": "private", "title": "T", "description": "D"}
                 ])
             with sqlite3.connect(db_path) as conn:
@@ -154,7 +195,7 @@ def test_write_geo_metrics_upserts_rows():
                 {"metric_date": "2026-05-01", "country_code": "US",
                  "views": 200, "subscribers_gained": 3, "likes": 8},
             ]
-            write_geo_metrics(rows)
+            write_geo_metrics("human_workforce", rows)
 
             with sqlite3.connect(db_path) as conn:
                 count = conn.execute(
@@ -169,7 +210,7 @@ def test_write_geo_metrics_upserts_rows():
                 assert views == 1000
 
             # Upsert: re-insert same key with updated views — row count stays at 2
-            write_geo_metrics([
+            write_geo_metrics("human_workforce", [
                 {"metric_date": "2026-05-01", "country_code": "IN",
                  "views": 1500, "subscribers_gained": 25, "likes": 60},
             ])
@@ -195,7 +236,7 @@ def test_write_geo_metrics_empty_list_is_noop():
             import db
             db.init_db()
             from fetch_metrics import write_geo_metrics
-            write_geo_metrics([])
+            write_geo_metrics("human_workforce", [])
             with sqlite3.connect(db_path) as conn:
                 count = conn.execute(
                     "SELECT COUNT(*) FROM daily_geo_metrics"
@@ -223,7 +264,7 @@ def test_write_queue_recommendations_inserts_first_occurrence():
                     "why_now": "Major AI news today.",
                 }
             ]
-            write_queue_recommendations(ranked, date(2026, 6, 14))
+            write_queue_recommendations("human_workforce", ranked, date(2026, 6, 14))
             with sqlite3.connect(db_path) as conn:
                 row = conn.execute(
                     "SELECT video_id, recommended_publish_date, rank_at_recommendation, relevance_score "
@@ -246,11 +287,11 @@ def test_write_queue_recommendations_ignores_duplicate_video_id():
             from fetch_metrics import write_queue_recommendations
             video = [{"rank": 1, "video_id": "v1", "title": "T", "theme": "AI",
                       "relevance_score": 8.0, "why_now": "First time."}]
-            write_queue_recommendations(video, date(2026, 6, 14))
+            write_queue_recommendations("human_workforce", video, date(2026, 6, 14))
             # Second call simulates next cron run with same video at different rank
             video2 = [{"rank": 3, "video_id": "v1", "title": "T", "theme": "AI",
                        "relevance_score": 5.0, "why_now": "Second time."}]
-            write_queue_recommendations(video2, date(2026, 6, 15))
+            write_queue_recommendations("human_workforce", video2, date(2026, 6, 15))
             with sqlite3.connect(db_path) as conn:
                 count = conn.execute(
                     "SELECT COUNT(*) FROM queue_recommendations"
@@ -274,7 +315,7 @@ def test_write_queue_recommendations_noop_when_empty():
             import db as db_module
             db_module.init_db()
             from fetch_metrics import write_queue_recommendations
-            write_queue_recommendations([], date(2026, 6, 14))
+            write_queue_recommendations("human_workforce", [], date(2026, 6, 14))
             with sqlite3.connect(db_path) as conn:
                 count = conn.execute(
                     "SELECT COUNT(*) FROM queue_recommendations"
