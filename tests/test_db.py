@@ -107,9 +107,10 @@ def test_publishing_queue_autoincrement_and_columns():
                 row = conn.execute("SELECT * FROM publishing_queue").fetchone()
                 assert row[0] == 1          # id
                 assert row[1] == "2026-05-13T10:00:00Z"  # analyzed_at
-                assert row[2] == 3          # videos_analyzed
-                assert row[3] == 20         # news_stories_count
-                assert "ranked_videos" in row[4]  # result_json
+                assert row[2] == "human_workforce"  # channel
+                assert row[3] == 3          # videos_analyzed
+                assert row[4] == 20         # news_stories_count
+                assert "ranked_videos" in row[5]  # result_json
 
 
 def test_daily_geo_metrics_table_created():
@@ -180,3 +181,55 @@ def test_queue_recommendations_insert_or_ignore():
                     "SELECT COUNT(*) FROM queue_recommendations"
                 ).fetchone()[0]
                 assert count == 1
+
+
+def test_migrate_add_channel_column_backfills_existing_rows(tmp_path):
+    db_path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(db_path)
+    # Simulate the pre-migration (single-channel) schema for one representative table.
+    conn.execute(
+        "CREATE TABLE videos (video_id TEXT PRIMARY KEY, title TEXT, description TEXT, "
+        "published_at TEXT, duration_seconds INTEGER, thumbnail_url TEXT)"
+    )
+    conn.execute("INSERT INTO videos(video_id, title) VALUES ('vid1', 'Old Video')")
+    conn.commit()
+
+    from db import DEFAULT_CHANNEL, migrate_add_channel_column
+    migrate_add_channel_column(conn)
+
+    row = conn.execute("SELECT channel, video_id FROM videos WHERE video_id='vid1'").fetchone()
+    assert row == (DEFAULT_CHANNEL, "vid1")
+    conn.close()
+
+
+def test_migrate_add_channel_column_is_idempotent(tmp_path):
+    db_path = tmp_path / "legacy2.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE videos (video_id TEXT PRIMARY KEY, title TEXT, description TEXT, "
+        "published_at TEXT, duration_seconds INTEGER, thumbnail_url TEXT)"
+    )
+    conn.commit()
+    from db import migrate_add_channel_column
+    migrate_add_channel_column(conn)
+    migrate_add_channel_column(conn)  # must not raise on second run
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(videos)").fetchall()]
+    assert cols.count("channel") == 1
+    conn.close()
+
+
+def test_schema_creates_channel_columns(tmp_path):
+    db_path = tmp_path / "fresh.db"
+    conn = sqlite3.connect(db_path)
+    from db import SCHEMA
+    conn.executescript(SCHEMA)
+    for table in [
+        "channel_snapshots", "videos", "video_snapshots", "daily_video_metrics",
+        "daily_channel_metrics", "retention_buckets", "daily_geo_metrics",
+        "publishing_queue", "playlists", "playlist_videos", "queue_recommendations",
+        "video_traffic_source_metrics", "channel_traffic_sources",
+        "ci_video_scores", "ci_content_assets",
+    ]:
+        cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+        assert "channel" in cols, f"{table} missing channel column"
+    conn.close()
