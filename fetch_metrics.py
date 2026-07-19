@@ -43,7 +43,28 @@ ROLLING_WINDOWS = (
 )
 
 
-def write_retention_rolling_windows(video_ids: list[str], today: date | None = None) -> None:
+CHANNEL_CONFIGS = [
+    {
+        "key": "human_workforce",
+        "channel_id_env": "YT_CHANNEL_ID_HW",
+        "refresh_token_env": "YT_REFRESH_TOKEN_HW",
+    },
+    {
+        "key": "club_genius",
+        "channel_id_env": "YT_CHANNEL_ID_CGS",
+        "refresh_token_env": "YT_REFRESH_TOKEN_CGS",
+    },
+    {
+        "key": "kzak",
+        "channel_id_env": "YT_CHANNEL_ID_KZAK",
+        "refresh_token_env": "YT_REFRESH_TOKEN_KZAK",
+    },
+]
+
+
+def write_retention_rolling_windows(
+    channel: str, video_ids: list[str], today: date | None = None
+) -> None:
     """Fetch retention curves for three rolling windows per video and persist them.
 
     Views are fetched directly from YouTube Analytics for each window — the
@@ -67,30 +88,30 @@ def write_retention_rolling_windows(video_ids: list[str], today: date | None = N
                     print(f"  skip {vid} {kind}: {e.__class__.__name__}")
                     continue
                 conn.execute(
-                    "INSERT INTO retention_buckets(video_id, window_start, window_end, "
+                    "INSERT INTO retention_buckets(channel, video_id, window_start, window_end, "
                     "window_kind, views, retention_at_25, retention_at_75, fetched_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
-                    "ON CONFLICT(video_id, window_start, window_end, window_kind) DO UPDATE SET "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(channel, video_id, window_start, window_end, window_kind) DO UPDATE SET "
                     "views=excluded.views, retention_at_25=excluded.retention_at_25, "
                     "retention_at_75=excluded.retention_at_75, fetched_at=excluded.fetched_at",
-                    (vid, start.isoformat(), today.isoformat(), kind,
+                    (channel, vid, start.isoformat(), today.isoformat(), kind,
                      int(views), curve["retention_at_25"], curve["retention_at_75"],
                      fetched_at),
                 )
 
 
-def write_publishing_queue(videos: list[dict]) -> dict | None:
+def write_publishing_queue(channel: str, videos: list[dict]) -> dict | None:
     """Classify unpublished video themes, rank by news relevance, persist to DB."""
     unpublished = [v for v in videos if v.get("privacy_status") != "public"]
     if not unpublished:
         print("  No unpublished videos, skipping publishing queue.")
-        return
+        return None
 
     print(f"  Found {len(unpublished)} unpublished videos.")
     anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
     if not anthropic_key:
         print("  ANTHROPIC_API_KEY not set, skipping publishing queue.")
-        return
+        return None
 
     ai = anthropic.Anthropic(api_key=anthropic_key)
     analyzed_at = datetime.now(timezone.utc).isoformat()
@@ -121,15 +142,15 @@ def write_publishing_queue(videos: list[dict]) -> dict | None:
 
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO publishing_queue(analyzed_at, videos_analyzed, news_stories_count, result_json) "
-            "VALUES (?, ?, ?, ?)",
-            (analyzed_at, len(unpublished), len(headlines), json.dumps(result)),
+            "INSERT INTO publishing_queue(analyzed_at, channel, videos_analyzed, news_stories_count, result_json) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (analyzed_at, channel, len(unpublished), len(headlines), json.dumps(result)),
         )
     print(f"  Publishing queue written: {len(ranked)} videos ranked against {len(headlines)} headlines.")
     return result
 
 
-def write_queue_recommendations(ranked_videos: list[dict], cron_date: date) -> None:
+def write_queue_recommendations(channel: str, ranked_videos: list[dict], cron_date: date) -> None:
     """Persist first-time queue appearances to queue_recommendations (INSERT OR IGNORE)."""
     if not ranked_videos:
         return
@@ -140,10 +161,11 @@ def write_queue_recommendations(ranked_videos: list[dict], cron_date: date) -> N
             recommended_publish_date = (cron_date + timedelta(days=rank)).isoformat()
             conn.execute(
                 "INSERT OR IGNORE INTO queue_recommendations "
-                "(video_id, first_recommended_at, recommended_publish_date, "
+                "(channel, video_id, first_recommended_at, recommended_publish_date, "
                 "rank_at_recommendation, relevance_score, theme, why_now) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
+                    channel,
                     item.get("video_id"),
                     first_recommended_at,
                     recommended_publish_date,
@@ -156,40 +178,40 @@ def write_queue_recommendations(ranked_videos: list[dict], cron_date: date) -> N
     print(f"  Queue recommendations: {len(ranked_videos)} videos processed (INSERT OR IGNORE).")
 
 
-def write_geo_metrics(rows: list[dict]) -> None:
+def write_geo_metrics(channel: str, rows: list[dict]) -> None:
     """Persist geographic metrics to daily_geo_metrics table with upsert."""
     with get_conn() as conn:
         for d in rows:
             conn.execute(
-                "INSERT INTO daily_geo_metrics(metric_date, country_code, views, "
-                "subscribers_gained, likes) VALUES (?, ?, ?, ?, ?) "
-                "ON CONFLICT(metric_date, country_code) DO UPDATE SET "
+                "INSERT INTO daily_geo_metrics(metric_date, channel, country_code, views, "
+                "subscribers_gained, likes) VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(channel, metric_date, country_code) DO UPDATE SET "
                 "views=excluded.views, "
                 "subscribers_gained=excluded.subscribers_gained, "
                 "likes=excluded.likes",
-                (d["metric_date"], d["country_code"], d["views"],
+                (d["metric_date"], channel, d["country_code"], d["views"],
                  d["subscribers_gained"], d["likes"]),
             )
 
 
-def main() -> None:
-    init_db()
-    requested = os.environ.get("YT_CHANNEL_ID") or None
+def run_for_channel(channel_key: str, channel_id_env: str, refresh_token_env: str) -> None:
+    os.environ["YT_REFRESH_TOKEN"] = os.environ[refresh_token_env]
+    requested = os.environ.get(channel_id_env) or None
     captured_at = datetime.now(timezone.utc).isoformat()
 
-    print(f"[{captured_at}] Resolving channel...")
+    print(f"[{captured_at}] [{channel_key}] Resolving channel...")
     requested_channel_id = resolve_channel_id(requested)
 
-    print("Fetching channel stats...")
+    print(f"[{channel_key}] Fetching channel stats...")
     channel = fetch_channel_stats(requested_channel_id)
     channel_id = channel["channel_id"]
-    print(f"Channel: {channel['channel_title']} ({channel_id})")
+    print(f"[{channel_key}] Channel: {channel['channel_title']} ({channel_id})")
 
-    print("Fetching all video IDs from uploads playlist...")
+    print(f"[{channel_key}] Fetching all video IDs from uploads playlist...")
     video_ids = fetch_all_video_ids(channel["uploads_playlist_id"])
-    print(f"Found {len(video_ids)} videos.")
+    print(f"[{channel_key}] Found {len(video_ids)} videos.")
 
-    print("Fetching video details...")
+    print(f"[{channel_key}] Fetching video details...")
     videos = fetch_video_details(video_ids)
 
     end = date.today()
@@ -197,28 +219,28 @@ def main() -> None:
     # Use lifetime window for per-video aggregates so subscribersGained reflects
     # all-time contribution per video, not just the rolling 90-day window.
     video_start = date(2005, 1, 1)
-    print(f"Fetching daily channel metrics {start} -> {end}...")
+    print(f"[{channel_key}] Fetching daily channel metrics {start} -> {end}...")
     try:
         daily_channel = fetch_daily_channel_metrics(start, end, channel_id)
     except Exception as e:
         print(f"  daily channel metrics failed ({e.__class__.__name__}), skipping.")
         daily_channel = []
 
-    print(f"Fetching per-video totals {video_start} -> {end}...")
+    print(f"[{channel_key}] Fetching per-video totals {video_start} -> {end}...")
     try:
         daily_video = fetch_video_period_metrics(video_start, end, channel_id)
     except Exception as e:
         print(f"  per-video totals failed ({e.__class__.__name__}), skipping.")
         daily_video = []
 
-    print(f"Fetching daily geo metrics {start} -> {end}...")
+    print(f"[{channel_key}] Fetching daily geo metrics {start} -> {end}...")
     try:
         daily_geo = fetch_daily_geo_metrics(start, end, channel_id)
     except Exception as e:
         print(f"  daily geo metrics failed ({e.__class__.__name__}: {e}), skipping.")
         daily_geo = []
 
-    print(f"Fetching channel traffic source breakdown {start} -> {end}...")
+    print(f"[{channel_key}] Fetching channel traffic source breakdown {start} -> {end}...")
     try:
         channel_traffic = fetch_channel_traffic_sources(start, end, channel_id)
         print(f"  {len(channel_traffic)} traffic source types.")
@@ -226,7 +248,7 @@ def main() -> None:
         print(f"  channel traffic sources failed ({e.__class__.__name__}: {e}), skipping.")
         channel_traffic = []
 
-    print(f"Fetching ADVERTISING traffic source metrics for {len(video_ids)} videos {start} -> {end}...")
+    print(f"[{channel_key}] Fetching ADVERTISING traffic source metrics for {len(video_ids)} videos {start} -> {end}...")
     try:
         traffic_source = fetch_video_traffic_source_metrics(video_ids, start, end, channel_id)
         print(f"  {len(traffic_source)} videos had ADVERTISING traffic.")
@@ -234,7 +256,7 @@ def main() -> None:
         print(f"  traffic source metrics failed ({e.__class__.__name__}: {e}), skipping.")
         traffic_source = []
 
-    print("Fetching channel playlists...")
+    print(f"[{channel_key}] Fetching channel playlists...")
     try:
         playlists = fetch_channel_playlists(channel_id)
         print(f"Found {len(playlists)} playlists.")
@@ -242,7 +264,7 @@ def main() -> None:
         print(f"  playlist fetch failed ({e.__class__.__name__}: {e}), skipping.")
         playlists = []
 
-    print("Fetching playlist video memberships...")
+    print(f"[{channel_key}] Fetching playlist video memberships...")
     playlist_video_memberships = []
     for p in playlists:
         try:
@@ -259,125 +281,133 @@ def main() -> None:
 
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO channel_snapshots(captured_at, channel_id, subscriber_count, view_count, video_count) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (captured_at, channel_id, channel["subscriber_count"],
+            "INSERT INTO channel_snapshots(captured_at, channel, channel_id, subscriber_count, view_count, video_count) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (captured_at, channel_key, channel_id, channel["subscriber_count"],
              channel["view_count"], channel["video_count"]),
         )
 
         for v in videos:
             conn.execute(
-                "INSERT INTO videos(video_id, title, description, published_at, duration_seconds, thumbnail_url) "
-                "VALUES (?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(video_id) DO UPDATE SET title=excluded.title, "
+                "INSERT INTO videos(channel, video_id, title, description, published_at, duration_seconds, thumbnail_url) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(channel, video_id) DO UPDATE SET title=excluded.title, "
                 "description=excluded.description, thumbnail_url=excluded.thumbnail_url",
-                (v["video_id"], v["title"], v["description"], v["published_at"],
+                (channel_key, v["video_id"], v["title"], v["description"], v["published_at"],
                  parse_iso8601_duration(v["duration"]), v["thumbnail_url"]),
             )
             conn.execute(
-                "INSERT INTO video_snapshots(captured_at, video_id, view_count, like_count, comment_count) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (captured_at, v["video_id"], v["view_count"], v["like_count"], v["comment_count"]),
+                "INSERT INTO video_snapshots(captured_at, channel, video_id, view_count, like_count, comment_count) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (captured_at, channel_key, v["video_id"], v["view_count"], v["like_count"], v["comment_count"]),
             )
 
         for d in daily_channel:
             conn.execute(
-                "INSERT INTO daily_channel_metrics(metric_date, views, estimated_minutes_watched, "
-                "subscribers_gained, subscribers_lost) VALUES (?, ?, ?, ?, ?) "
-                "ON CONFLICT(metric_date) DO UPDATE SET views=excluded.views, "
+                "INSERT INTO daily_channel_metrics(metric_date, channel, views, estimated_minutes_watched, "
+                "subscribers_gained, subscribers_lost) VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(channel, metric_date) DO UPDATE SET views=excluded.views, "
                 "estimated_minutes_watched=excluded.estimated_minutes_watched, "
                 "subscribers_gained=excluded.subscribers_gained, "
                 "subscribers_lost=excluded.subscribers_lost",
-                (d["metric_date"], d["views"], d["estimated_minutes_watched"],
+                (d["metric_date"], channel_key, d["views"], d["estimated_minutes_watched"],
                  d["subscribers_gained"], d["subscribers_lost"]),
             )
 
         for d in daily_video:
             conn.execute(
-                "INSERT INTO daily_video_metrics(metric_date, video_id, views, "
+                "INSERT INTO daily_video_metrics(metric_date, channel, video_id, views, "
                 "estimated_minutes_watched, average_view_duration, likes, subscribers_gained) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(metric_date, video_id) DO UPDATE SET views=excluded.views, "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(channel, metric_date, video_id) DO UPDATE SET views=excluded.views, "
                 "estimated_minutes_watched=excluded.estimated_minutes_watched, "
                 "average_view_duration=excluded.average_view_duration, "
                 "likes=excluded.likes, subscribers_gained=excluded.subscribers_gained",
-                (d["metric_date"], d["video_id"], d["views"], d["estimated_minutes_watched"],
+                (d["metric_date"], channel_key, d["video_id"], d["views"], d["estimated_minutes_watched"],
                  d["average_view_duration"], d["likes"], d["subscribers_gained"]),
             )
 
         for d in channel_traffic:
             conn.execute(
-                "INSERT INTO channel_traffic_sources(metric_date, traffic_source_type, views, "
-                "estimated_minutes_watched) VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(metric_date, traffic_source_type) DO UPDATE SET "
+                "INSERT INTO channel_traffic_sources(metric_date, channel, traffic_source_type, views, "
+                "estimated_minutes_watched) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(channel, metric_date, traffic_source_type) DO UPDATE SET "
                 "views=excluded.views, "
                 "estimated_minutes_watched=excluded.estimated_minutes_watched",
-                (d["metric_date"], d["traffic_source_type"], d["views"],
+                (d["metric_date"], channel_key, d["traffic_source_type"], d["views"],
                  d["estimated_minutes_watched"]),
             )
 
         for d in traffic_source:
             conn.execute(
                 "INSERT INTO video_traffic_source_metrics("
-                "metric_date, video_id, traffic_source_type, "
+                "metric_date, channel, video_id, traffic_source_type, "
                 "views, estimated_minutes_watched, average_view_duration) "
-                "VALUES (?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(metric_date, video_id, traffic_source_type) DO UPDATE SET "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(channel, metric_date, video_id, traffic_source_type) DO UPDATE SET "
                 "views=excluded.views, "
                 "estimated_minutes_watched=excluded.estimated_minutes_watched, "
                 "average_view_duration=excluded.average_view_duration",
-                (d["metric_date"], d["video_id"], d["traffic_source_type"],
+                (d["metric_date"], channel_key, d["video_id"], d["traffic_source_type"],
                  d["views"], d["estimated_minutes_watched"], d["average_view_duration"]),
             )
 
         for p in playlists:
             conn.execute(
-                "INSERT INTO playlists(playlist_id, title, description, published_at, item_count, thumbnail_url) "
-                "VALUES (?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(playlist_id) DO UPDATE SET title=excluded.title, "
+                "INSERT INTO playlists(channel, playlist_id, title, description, published_at, item_count, thumbnail_url) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(channel, playlist_id) DO UPDATE SET title=excluded.title, "
                 "description=excluded.description, item_count=excluded.item_count, "
                 "thumbnail_url=excluded.thumbnail_url",
-                (p["playlist_id"], p["title"], p["description"], p["published_at"],
+                (channel_key, p["playlist_id"], p["title"], p["description"], p["published_at"],
                  p["item_count"], p["thumbnail_url"]),
             )
 
         for m in playlist_video_memberships:
             conn.execute(
-                "INSERT INTO playlist_videos(playlist_id, video_id, position) "
-                "VALUES (?, ?, ?) "
-                "ON CONFLICT(playlist_id, video_id) DO UPDATE SET position=excluded.position",
-                (m["playlist_id"], m["video_id"], m["position"]),
+                "INSERT INTO playlist_videos(channel, playlist_id, video_id, position) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(channel, playlist_id, video_id) DO UPDATE SET position=excluded.position",
+                (channel_key, m["playlist_id"], m["video_id"], m["position"]),
             )
 
     try:
-        write_geo_metrics(daily_geo)
+        write_geo_metrics(channel_key, daily_geo)
     except Exception as e:
         print(f"  geo metrics write failed ({e.__class__.__name__}), skipping.")
 
-    print("Fetching retention curves for rolling windows (7/90/365 days)...")
-    write_retention_rolling_windows([v["video_id"] for v in videos])
+    print(f"[{channel_key}] Fetching retention curves for rolling windows (7/90/365 days)...")
+    write_retention_rolling_windows(channel_key, [v["video_id"] for v in videos])
 
-    print("Analyzing publishing queue...")
+    print(f"[{channel_key}] Analyzing publishing queue...")
     pq_result = None
     try:
-        pq_result = write_publishing_queue(videos)
+        pq_result = write_publishing_queue(channel_key, videos)
     except Exception as e:
         print(f"  Publishing queue failed ({e.__class__.__name__}), skipping.")
 
-    print("Writing queue recommendations...")
+    print(f"[{channel_key}] Writing queue recommendations...")
     try:
         ranked_for_recs = pq_result.get("ranked_videos", []) if pq_result else []
-        write_queue_recommendations(ranked_for_recs, date.today())
+        write_queue_recommendations(channel_key, ranked_for_recs, date.today())
     except Exception as e:
         print(f"  Queue recommendations write failed ({e.__class__.__name__}), skipping.")
 
-    print("Running content intelligence scoring...")
+    print(f"[{channel_key}] Running content intelligence scoring...")
     try:
-        ci_scores = _ci_run_scoring(Path(str(_DB_PATH)))
+        ci_scores = _ci_run_scoring(Path(str(_DB_PATH)), channel=channel_key)
         print(f"  Content intelligence: scored {len(ci_scores)} videos.")
     except Exception as e:
         print(f"  Content intelligence scoring failed ({e.__class__.__name__}), skipping.")
 
+
+def main() -> None:
+    init_db()
+    for cfg in CHANNEL_CONFIGS:
+        try:
+            run_for_channel(cfg["key"], cfg["channel_id_env"], cfg["refresh_token_env"])
+        except Exception as e:
+            print(f"[{cfg['key']}] FAILED entirely ({e.__class__.__name__}: {e}), continuing to next channel.")
     print("Done.")
 
 

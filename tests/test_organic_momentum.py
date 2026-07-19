@@ -8,6 +8,7 @@ from analytics.organic_momentum import (
     ScoreWeights,
     _percentile_rank,
     _PopStats,
+    build_momentum_data,
     calculate_growth_rate,
     calculate_organic_momentum_score,
     calculate_post_promotion_lift,
@@ -293,3 +294,17 @@ def test_scorer_sets_classification() -> None:
 
 def test_scorer_empty_input() -> None:
     assert MomentumScorer().score_all([]) == []
+
+
+# ── channel scoping ───────────────────────────────────────────────────────────
+
+
+def test_build_momentum_data_requires_channel_arg() -> None:
+    import inspect
+    sig = inspect.signature(build_momentum_data)
+    assert "channel" in sig.parameters
+
+
+def test_build_momentum_data_empty_db_returns_empty(tmp_path) -> None:
+    db_path = tmp_path / "nonexistent.db"
+    assert build_momentum_data(str(db_path), "human_workforce") == []

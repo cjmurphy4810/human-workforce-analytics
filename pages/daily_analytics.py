@@ -11,6 +11,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from db import DB_PATH
+from channel_state import render_channel_selector
 
 st.set_page_config(page_title="Daily Analytics", layout="wide")
 
@@ -18,26 +19,29 @@ if not st.session_state.get("authenticated"):
     st.switch_page("app.py")
     st.stop()
 
+_active_channel = render_channel_selector()
+
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
 
 @st.cache_data(ttl=300)
-def _load_daily() -> pd.DataFrame:
+def _load_daily(channel: str) -> pd.DataFrame:
     with sqlite3.connect(str(DB_PATH)) as conn:
         try:
             return pd.read_sql_query(
                 "SELECT metric_date, views, estimated_minutes_watched, "
                 "subscribers_gained, subscribers_lost "
-                "FROM daily_channel_metrics ORDER BY metric_date",
+                "FROM daily_channel_metrics WHERE channel = :channel ORDER BY metric_date",
                 conn,
+                params={"channel": channel},
             )
         except Exception:
             return pd.DataFrame()
 
 
 @st.cache_data(ttl=300)
-def _load_video_daily() -> pd.DataFrame:
+def _load_video_daily(channel: str) -> pd.DataFrame:
     with sqlite3.connect(str(DB_PATH)) as conn:
         try:
             return pd.read_sql_query(
@@ -45,33 +49,38 @@ def _load_video_daily() -> pd.DataFrame:
                 "d.views, d.estimated_minutes_watched / 60.0 AS watch_hours, "
                 "d.average_view_duration "
                 "FROM daily_video_metrics d "
-                "LEFT JOIN videos v ON d.video_id = v.video_id "
+                "LEFT JOIN videos v ON d.video_id = v.video_id AND v.channel = d.channel "
+                "WHERE d.channel = :channel "
                 "ORDER BY d.metric_date",
                 conn,
+                params={"channel": channel},
             )
         except Exception:
             return pd.DataFrame()
 
 
 @st.cache_data(ttl=300)
-def _get_qual_ratio() -> float:
+def _get_qual_ratio(channel: str) -> float:
     """Qualifying ratio = (total video WH - ADVERTISING WH) / total video WH."""
     try:
         with sqlite3.connect(str(DB_PATH)) as conn:
             total = conn.execute(
                 "SELECT SUM(d.estimated_minutes_watched/60.0) FROM daily_video_metrics d "
                 "INNER JOIN (SELECT video_id, MAX(metric_date) AS ld "
-                "FROM daily_video_metrics GROUP BY video_id) l "
-                "ON d.video_id=l.video_id AND d.metric_date=l.ld"
+                "FROM daily_video_metrics WHERE channel = ? GROUP BY video_id) l "
+                "ON d.video_id=l.video_id AND d.metric_date=l.ld "
+                "WHERE d.channel = ?",
+                (channel, channel),
             ).fetchone()[0] or 0.0
             adv = conn.execute(
                 "SELECT SUM(d.estimated_minutes_watched/60.0) "
                 "FROM video_traffic_source_metrics d "
                 "INNER JOIN (SELECT video_id, MAX(metric_date) AS ld "
                 "FROM video_traffic_source_metrics "
-                "WHERE traffic_source_type='ADVERTISING' GROUP BY video_id) l "
+                "WHERE traffic_source_type='ADVERTISING' AND channel = ? GROUP BY video_id) l "
                 "ON d.video_id=l.video_id AND d.metric_date=l.ld "
-                "WHERE d.traffic_source_type='ADVERTISING'"
+                "WHERE d.traffic_source_type='ADVERTISING' AND d.channel = ?",
+                (channel, channel),
             ).fetchone()[0] or 0.0
         return max(total - adv, 0.0) / max(total, 1.0)
     except Exception:
@@ -82,9 +91,9 @@ def _get_qual_ratio() -> float:
 # Prepare data
 # ---------------------------------------------------------------------------
 
-_raw_daily = _load_daily()
-_raw_video = _load_video_daily()
-qual_ratio = _get_qual_ratio()
+_raw_daily = _load_daily(_active_channel)
+_raw_video = _load_video_daily(_active_channel)
+qual_ratio = _get_qual_ratio(_active_channel)
 
 st.header("Daily Analytics")
 

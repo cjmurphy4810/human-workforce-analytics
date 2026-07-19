@@ -26,6 +26,7 @@ from analytics.organic_momentum import (
     ScoreWeights,
     build_momentum_data,
 )
+from channel_state import render_channel_selector
 from models.organic_momentum import (
     MOMENTUM_CLASS_COLOR,
     MOMENTUM_CLASS_ICON,
@@ -36,6 +37,8 @@ from models.organic_momentum import (
 )
 
 st.set_page_config(page_title="Organic Momentum", layout="wide")
+
+_active_channel = render_channel_selector()
 
 _DB = Path(__file__).parent.parent / "data.db"
 
@@ -214,12 +217,12 @@ def _build_demo_data() -> list[OrganicMomentumMetrics]:
 
 
 @st.cache_data(ttl=300)
-def _load_scored(db_str: str, weights_json: str) -> list[dict]:
+def _load_scored(db_str: str, weights_json: str, channel: str) -> list[dict]:
     """Cache returns plain dicts to avoid Pydantic/pickle issues."""
     import json
     w_dict = json.loads(weights_json)
     weights = ScoreWeights(**w_dict)
-    metrics = build_momentum_data(db_str)
+    metrics = build_momentum_data(db_str, channel)
     if not metrics:
         return []
     scored = MomentumScorer(weights).score_all(metrics)
@@ -383,7 +386,7 @@ else:
 
 weights_json = _json.dumps(custom_weights.as_dict())
 
-raw_dicts = _load_scored(str(_DB), weights_json)
+raw_dicts = _load_scored(str(_DB), weights_json, _active_channel)
 if raw_dicts:
     all_metrics = [_dict_to_m(d) for d in raw_dicts]
     is_demo = False

@@ -18,6 +18,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from channel_state import render_channel_selector
 from content_intelligence.models import CLASSIFICATION_ACTIONS
 from content_intelligence.service import (
     ContentIntelligenceService,
@@ -28,8 +29,9 @@ from db import DB_PATH
 
 st.set_page_config(page_title="Content Intelligence", layout="wide")
 
+_active_channel = render_channel_selector()
 _DB = Path(DB_PATH)
-_SVC = ContentIntelligenceService(_DB)
+_SVC = ContentIntelligenceService(_DB, channel=_active_channel)
 
 # ── Classification display map ────────────────────────────────────────────────
 
@@ -48,17 +50,18 @@ _CLS_LABELS: dict[str, str] = {
 
 
 @st.cache_data(ttl=300)
-def _load_scored_library() -> tuple[list[dict], dict[str, dict]]:
+def _load_scored_library(channel: str) -> tuple[list[dict], dict[str, dict]]:
     """Return (ranked episode dicts, snapshot dict map) from one DB query."""
-    episodes, snapshots = _SVC._load_episodes_and_snapshots()
-    ranked = _SVC._scorer.rank_episodes(list(episodes), snapshots)
+    svc = ContentIntelligenceService(_DB, channel=channel)
+    episodes, snapshots = svc._load_episodes_and_snapshots()
+    ranked = svc._scorer.rank_episodes(list(episodes), snapshots)
     snap_map = {s.episode_id: s.model_dump() for s in snapshots}
     return [ep.model_dump() for ep in ranked], snap_map
 
 
 @st.cache_data(ttl=300)
-def _load_asset_library() -> list[dict]:
-    return load_assets(_DB)
+def _load_asset_library(channel: str) -> list[dict]:
+    return load_assets(_DB, channel=channel)
 
 
 # ── Row helpers ───────────────────────────────────────────────────────────────
@@ -142,7 +145,7 @@ def _panel(rows: list[dict], empty_msg: str) -> None:
         _episode_cards(rows)
 
 
-def _asset_tile(asset: dict) -> None:
+def _asset_tile(asset: dict, channel: str) -> None:
     key_id = asset.get("asset_id") or asset.get("id", "")
     with st.expander(f"{asset.get('title', '—')}  ·  `{asset.get('status', 'draft')}`"):
         body = asset.get("body") or asset.get("content") or ""
@@ -153,22 +156,22 @@ def _asset_tile(asset: dict) -> None:
         if status == "draft":
             if ca.button("Approve", key=f"appr_{key_id}"):
                 update_asset_status(
-                    _DB, key_id, "approved",
+                    _DB, key_id, "approved", channel=channel,
                     approved_at=datetime.now(timezone.utc).isoformat(),
                 )
                 st.cache_data.clear()
                 st.rerun()
             if cr.button("Reject", key=f"rejt_{key_id}"):
-                update_asset_status(_DB, key_id, "rejected")
+                update_asset_status(_DB, key_id, "rejected", channel=channel)
                 st.cache_data.clear()
                 st.rerun()
         elif status == "approved":
             if ca.button("Mark Published", key=f"pub_{key_id}"):
-                update_asset_status(_DB, key_id, "published")
+                update_asset_status(_DB, key_id, "published", channel=channel)
                 st.cache_data.clear()
                 st.rerun()
             if cr.button("Revoke", key=f"rev_{key_id}"):
-                update_asset_status(_DB, key_id, "draft")
+                update_asset_status(_DB, key_id, "draft", channel=channel)
                 st.cache_data.clear()
                 st.rerun()
 
@@ -183,7 +186,7 @@ st.caption(
 )
 
 # Load data once; all panels derive from this
-_all_eps, _snap_map = _load_scored_library()
+_all_eps, _snap_map = _load_scored_library(_active_channel)
 _rows = [_as_row(ep, _snap_map) for ep in _all_eps]
 
 if not _rows:
@@ -267,7 +270,7 @@ with tab_lib:
         "Phase 2 will auto-generate drafts from episode transcripts. "
         "Assets added manually will appear here."
     )
-    _assets = _load_asset_library()
+    _assets = _load_asset_library(_active_channel)
     if not _assets:
         st.info(
             "No assets yet. Asset generation (Phase 2) will populate this library "
@@ -304,4 +307,4 @@ with tab_lib:
         if not _filtered_assets:
             st.caption("No assets match the selected filters.")
         for _a in _filtered_assets:
-            _asset_tile(_a)
+            _asset_tile(_a, _active_channel)
