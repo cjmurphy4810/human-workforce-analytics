@@ -23,6 +23,7 @@ import plotly.express as px
 import streamlit as st
 
 from analytics.promotion_efficiency import compute_efficiency_scores
+from channel_state import render_channel_selector
 from db import DB_PATH
 from models.promotion import VideoPromotionMetrics, make_metrics
 from promotion_intelligence.promotion_prediction import PromotionPredictor
@@ -38,6 +39,7 @@ from promotion_intelligence.recommendation_models import (
 )
 
 st.set_page_config(page_title="Promotion Intelligence", layout="wide")
+_active_channel = render_channel_selector()
 
 _DB = Path(DB_PATH)
 
@@ -151,27 +153,29 @@ def _build_demo_features(cpv: float = 0.025) -> list[VideoFeatures]:
 
 
 @st.cache_data(ttl=300)
-def _db_query(db_str: str, sql: str) -> pd.DataFrame:
+def _db_query(db_str: str, sql: str, params: tuple | dict | None = None) -> pd.DataFrame:
     p = Path(db_str)
     if not p.exists():
         return pd.DataFrame()
     with sqlite3.connect(str(p)) as conn:
         try:
-            return pd.read_sql_query(sql, conn)
+            return pd.read_sql_query(sql, conn, params=params)
         except Exception:
             return pd.DataFrame()
 
 
-def _build_real_features(db: Path, cpv: float) -> list[VideoFeatures]:
+def _build_real_features(db: Path, cpv: float, channel: str) -> list[VideoFeatures]:
     """Load metrics from the real DB and build VideoFeatures."""
     vids = _db_query(str(db),
-        "SELECT video_id, title, published_at, duration_seconds FROM videos")
+        "SELECT video_id, title, published_at, duration_seconds FROM videos WHERE channel = :channel",
+        params={"channel": channel})
     if vids.empty:
         return []
 
     # Latest cumulative view count from video_snapshots
     snap = _db_query(str(db),
-        "SELECT video_id, view_count FROM video_snapshots ORDER BY captured_at")
+        "SELECT video_id, view_count FROM video_snapshots WHERE channel = :channel ORDER BY captured_at",
+        params={"channel": channel})
     if not snap.empty:
         snap = snap.groupby("video_id", as_index=False).last()[["video_id", "view_count"]]
 
@@ -185,9 +189,10 @@ def _build_real_features(db: Path, cpv: float) -> list[VideoFeatures]:
         FROM daily_video_metrics d
         INNER JOIN (
             SELECT video_id, MAX(metric_date) AS latest_date
-            FROM daily_video_metrics GROUP BY video_id
+            FROM daily_video_metrics WHERE channel = :channel GROUP BY video_id
         ) latest ON d.video_id = latest.video_id AND d.metric_date = latest.latest_date
-    """)
+        WHERE d.channel = :channel
+    """, params={"channel": channel})
 
     # ADVERTISING traffic (paid promotion)
     adv = _db_query(str(db), """
@@ -199,26 +204,27 @@ def _build_real_features(db: Path, cpv: float) -> list[VideoFeatures]:
         INNER JOIN (
             SELECT video_id, MAX(metric_date) AS latest_date
             FROM video_traffic_source_metrics
-            WHERE traffic_source_type = 'ADVERTISING' GROUP BY video_id
+            WHERE traffic_source_type = 'ADVERTISING' AND channel = :channel GROUP BY video_id
         ) latest ON d.video_id = latest.video_id AND d.metric_date = latest.latest_date
-        WHERE d.traffic_source_type = 'ADVERTISING'
-    """)
+        WHERE d.traffic_source_type = 'ADVERTISING' AND d.channel = :channel
+    """, params={"channel": channel})
 
     # RELATED_VIDEO traffic (follow-on discovery)
     rel = _db_query(str(db), """
         SELECT video_id, SUM(views) AS follow_on_views
         FROM video_traffic_source_metrics
-        WHERE traffic_source_type = 'RELATED_VIDEO'
+        WHERE traffic_source_type = 'RELATED_VIDEO' AND channel = :channel
         GROUP BY video_id
-    """)
+    """, params={"channel": channel})
 
     # Latest CI score for this video
     ci = _db_query(str(db), """
         SELECT s.video_id, s.overall_score AS ci_overall_score
         FROM ci_video_scores s
-        INNER JOIN (SELECT MAX(scored_at) AS latest FROM ci_video_scores) m
+        INNER JOIN (SELECT MAX(scored_at) AS latest FROM ci_video_scores WHERE channel = :channel) m
           ON s.scored_at = m.latest
-    """)
+        WHERE s.channel = :channel
+    """, params={"channel": channel})
 
     df = vids.copy()
     for side, col_default in [
@@ -483,7 +489,7 @@ with st.sidebar:
 
 # ── Load data ──────────────────────────────────────────────────────────────────
 
-real_features = _build_real_features(_DB, cpv)
+real_features = _build_real_features(_DB, cpv, channel=_active_channel)
 if real_features:
     all_features = real_features
     _data_mode = "real"
