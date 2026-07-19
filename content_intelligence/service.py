@@ -249,14 +249,14 @@ def run_scoring(db_path: Path, channel: str, scored_at: date | None = None) -> l
     return scores
 
 
-def save_asset(db_path: Path, asset: "LegacyContentAsset") -> None:
+def save_asset(db_path: Path, asset: "LegacyContentAsset", channel: str) -> None:
     """Persist a legacy ContentAsset dataclass to ci_content_assets."""
     with sqlite3.connect(str(db_path)) as conn:
         conn.execute(
             "INSERT INTO ci_content_assets "
             "(asset_id, video_id, video_title, asset_type, title, body, "
-            "generated_at, status, approved_at, scheduled_for, notes) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "generated_at, status, approved_at, scheduled_for, notes, channel) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(asset_id) DO UPDATE SET "
             "status=excluded.status, "
             "approved_at=excluded.approved_at, "
@@ -267,6 +267,7 @@ def save_asset(db_path: Path, asset: "LegacyContentAsset") -> None:
                 asset.asset_type, asset.title, asset.body,
                 asset.generated_at, asset.status,
                 asset.approved_at, asset.scheduled_for, asset.notes,
+                channel,
             ),
         )
 
@@ -301,22 +302,30 @@ def update_asset_status(
         )
 
 
-def load_scores(db_path: Path, scored_at: date | None = None) -> list[dict[str, Any]]:
+def load_scores(
+    db_path: Path, channel: str, scored_at: date | None = None
+) -> list[dict[str, Any]]:
     """Load the latest (or specific date) scores as plain dicts."""
     with sqlite3.connect(str(db_path)) as conn:
         conn.row_factory = sqlite3.Row
         if scored_at:
             rows = conn.execute(
-                "SELECT * FROM ci_video_scores WHERE scored_at=? ORDER BY overall_score DESC",
-                (scored_at.isoformat(),),
+                "SELECT * FROM ci_video_scores WHERE scored_at=? AND channel=? "
+                "ORDER BY overall_score DESC",
+                (scored_at.isoformat(), channel),
             ).fetchall()
         else:
-            rows = conn.execute("""
+            rows = conn.execute(
+                """
                 SELECT s.* FROM ci_video_scores s
-                INNER JOIN (SELECT MAX(scored_at) AS latest FROM ci_video_scores) m
-                  ON s.scored_at = m.latest
+                INNER JOIN (
+                    SELECT MAX(scored_at) AS latest FROM ci_video_scores WHERE channel=?
+                ) m ON s.scored_at = m.latest
+                WHERE s.channel=?
                 ORDER BY s.overall_score DESC
-            """).fetchall()
+            """,
+                (channel, channel),
+            ).fetchall()
     return [dict(r) for r in rows]
 
 
