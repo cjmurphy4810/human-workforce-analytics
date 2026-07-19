@@ -45,9 +45,11 @@ class ContentIntelligenceService:
     def __init__(
         self,
         db_path: Path,
+        channel: str,
         config: ScoringConfig | None = None,
     ) -> None:
         self._db_path = db_path
+        self._channel = channel
         self._scorer = ContentScorer(config)
 
     # ── Data loading ──────────────────────────────────────────────────────────
@@ -61,10 +63,12 @@ class ContentIntelligenceService:
 
             video_rows = conn.execute(
                 "SELECT video_id, title, description, published_at, "
-                "duration_seconds, thumbnail_url FROM videos"
+                "duration_seconds, thumbnail_url FROM videos WHERE channel = ?",
+                (self._channel,),
             ).fetchall()
 
-            metric_rows = conn.execute("""
+            metric_rows = conn.execute(
+                """
                 SELECT
                     d.video_id,
                     d.views,
@@ -77,17 +81,19 @@ class ContentIntelligenceService:
                 FROM daily_video_metrics d
                 INNER JOIN (
                     SELECT video_id, MAX(metric_date) AS latest_date
-                    FROM daily_video_metrics GROUP BY video_id
+                    FROM daily_video_metrics WHERE channel = ? GROUP BY video_id
                 ) latest ON d.video_id = latest.video_id
                          AND d.metric_date = latest.latest_date
                 LEFT JOIN (
                     SELECT video_id, SUM(views) AS adv_views
                     FROM video_traffic_source_metrics
-                    WHERE traffic_source_type = 'ADVERTISING'
+                    WHERE traffic_source_type = 'ADVERTISING' AND channel = ?
                     GROUP BY video_id
                 ) adv ON d.video_id = adv.video_id
-                WHERE d.views > 0
-            """).fetchall()
+                WHERE d.views > 0 AND d.channel = ?
+            """,
+                (self._channel, self._channel, self._channel),
+            ).fetchall()
 
         metric_map: dict[str, dict[str, Any]] = {r["video_id"]: dict(r) for r in metric_rows}
 
@@ -206,7 +212,7 @@ class ContentIntelligenceService:
 # Used by fetch_metrics.py and the legacy Streamlit page view.
 
 
-def run_scoring(db_path: Path, scored_at: date | None = None) -> list[VideoScore]:
+def run_scoring(db_path: Path, channel: str, scored_at: date | None = None) -> list[VideoScore]:
     """Score all videos and upsert results to ci_video_scores (legacy path)."""
     scores = score_videos(db_path, scored_at)
     if not scores:
@@ -216,11 +222,11 @@ def run_scoring(db_path: Path, scored_at: date | None = None) -> list[VideoScore
         for s in scores:
             conn.execute(
                 "INSERT INTO ci_video_scores "
-                "(scored_at, video_id, tier, engagement_score, evergreen_score, "
+                "(scored_at, channel, video_id, tier, engagement_score, evergreen_score, "
                 "subscriber_magnet_score, hidden_gem_score, overall_score, "
                 "total_views, watch_rate_pct, like_rate_pct, sub_rate_pct, promotion_ratio) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(scored_at, video_id) DO UPDATE SET "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(channel, scored_at, video_id) DO UPDATE SET "
                 "tier=excluded.tier, "
                 "engagement_score=excluded.engagement_score, "
                 "evergreen_score=excluded.evergreen_score, "
@@ -233,7 +239,7 @@ def run_scoring(db_path: Path, scored_at: date | None = None) -> list[VideoScore
                 "sub_rate_pct=excluded.sub_rate_pct, "
                 "promotion_ratio=excluded.promotion_ratio",
                 (
-                    s.scored_at, s.video_id, s.tier,
+                    s.scored_at, channel, s.video_id, s.tier,
                     s.engagement_score, s.evergreen_score,
                     s.subscriber_magnet_score, s.hidden_gem_score, s.overall_score,
                     s.total_views, s.watch_rate_pct, s.like_rate_pct,
@@ -269,6 +275,7 @@ def update_asset_status(
     db_path: Path,
     asset_id: str,
     status: str,
+    channel: str,
     approved_at: str | None = None,
     scheduled_for: str | None = None,
     notes: str | None = None,
@@ -286,9 +293,10 @@ def update_asset_status(
         fields.append("notes=?")
         params.append(notes)
     params.append(asset_id)
+    params.append(channel)
     with sqlite3.connect(str(db_path)) as conn:
         conn.execute(
-            f"UPDATE ci_content_assets SET {', '.join(fields)} WHERE asset_id=?",
+            f"UPDATE ci_content_assets SET {', '.join(fields)} WHERE asset_id=? AND channel=?",
             params,
         )
 
@@ -314,13 +322,14 @@ def load_scores(db_path: Path, scored_at: date | None = None) -> list[dict[str, 
 
 def load_assets(
     db_path: Path,
+    channel: str,
     asset_type: str | None = None,
     status: str | None = None,
     video_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Load content assets with optional filters, newest first."""
-    clauses: list[str] = []
-    params: list[object] = []
+    clauses: list[str] = ["channel=?"]
+    params: list[object] = [channel]
     if asset_type:
         clauses.append("asset_type=?")
         params.append(asset_type)
