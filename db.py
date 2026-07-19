@@ -206,6 +206,155 @@ _CHANNEL_TABLES = (
     "ci_video_scores", "ci_content_assets",
 )
 
+# Tables whose ON CONFLICT/upsert logic in fetch_metrics.py and
+# content_intelligence/service.py targets a composite (channel, ...) key.
+# `ALTER TABLE ADD COLUMN` (migrate_add_channel_column) cannot add or change a
+# PRIMARY KEY/UNIQUE constraint on an existing SQLite table, so a pre-existing
+# installation's tables keep their old single-column key forever unless
+# rebuilt — leaving `ON CONFLICT(channel, ...)` with no matching constraint to
+# target, which raises OperationalError at insert time. This rebuilds each
+# table (create-with-new-schema, copy by column name, drop, rename) so the
+# real constraint matches what fetch_metrics.py/service.py expect.
+_COMPOSITE_KEY_REBUILDS: dict[str, str] = {
+    "videos": """
+        CREATE TABLE {name} (
+            channel TEXT NOT NULL DEFAULT 'human_workforce',
+            video_id TEXT NOT NULL,
+            title TEXT,
+            description TEXT,
+            published_at TEXT,
+            duration_seconds INTEGER,
+            thumbnail_url TEXT,
+            PRIMARY KEY (channel, video_id)
+        )
+    """,
+    "daily_video_metrics": """
+        CREATE TABLE {name} (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            metric_date TEXT NOT NULL,
+            channel TEXT NOT NULL DEFAULT 'human_workforce',
+            video_id TEXT NOT NULL,
+            views INTEGER,
+            estimated_minutes_watched REAL,
+            average_view_duration REAL,
+            likes INTEGER,
+            subscribers_gained INTEGER,
+            UNIQUE(channel, metric_date, video_id)
+        )
+    """,
+    "daily_channel_metrics": """
+        CREATE TABLE {name} (
+            metric_date TEXT NOT NULL,
+            channel TEXT NOT NULL DEFAULT 'human_workforce',
+            views INTEGER,
+            estimated_minutes_watched REAL,
+            subscribers_gained INTEGER,
+            subscribers_lost INTEGER,
+            PRIMARY KEY (channel, metric_date)
+        )
+    """,
+    "retention_buckets": """
+        CREATE TABLE {name} (
+            channel TEXT NOT NULL DEFAULT 'human_workforce',
+            video_id TEXT NOT NULL,
+            window_start TEXT NOT NULL,
+            window_end TEXT NOT NULL,
+            window_kind TEXT NOT NULL,
+            views INTEGER NOT NULL,
+            retention_at_25 REAL NOT NULL,
+            retention_at_75 REAL NOT NULL,
+            fetched_at TEXT NOT NULL,
+            PRIMARY KEY (channel, video_id, window_start, window_end, window_kind)
+        )
+    """,
+    "daily_geo_metrics": """
+        CREATE TABLE {name} (
+            metric_date        TEXT NOT NULL,
+            channel             TEXT NOT NULL DEFAULT 'human_workforce',
+            country_code       TEXT NOT NULL,
+            views              INTEGER,
+            subscribers_gained INTEGER,
+            likes              INTEGER,
+            PRIMARY KEY (channel, metric_date, country_code)
+        )
+    """,
+    "playlists": """
+        CREATE TABLE {name} (
+            channel TEXT NOT NULL DEFAULT 'human_workforce',
+            playlist_id TEXT NOT NULL,
+            title TEXT,
+            description TEXT,
+            published_at TEXT,
+            item_count INTEGER,
+            thumbnail_url TEXT,
+            PRIMARY KEY (channel, playlist_id)
+        )
+    """,
+    "playlist_videos": """
+        CREATE TABLE {name} (
+            channel TEXT NOT NULL DEFAULT 'human_workforce',
+            playlist_id TEXT NOT NULL,
+            video_id TEXT NOT NULL,
+            position INTEGER,
+            PRIMARY KEY (channel, playlist_id, video_id)
+        )
+    """,
+    "queue_recommendations": """
+        CREATE TABLE {name} (
+            channel TEXT NOT NULL DEFAULT 'human_workforce',
+            video_id TEXT NOT NULL,
+            first_recommended_at TEXT NOT NULL,
+            recommended_publish_date TEXT NOT NULL,
+            rank_at_recommendation INTEGER NOT NULL,
+            relevance_score REAL NOT NULL,
+            theme TEXT,
+            why_now TEXT,
+            PRIMARY KEY (channel, video_id)
+        )
+    """,
+    "video_traffic_source_metrics": """
+        CREATE TABLE {name} (
+            metric_date              TEXT NOT NULL,
+            channel                  TEXT NOT NULL DEFAULT 'human_workforce',
+            video_id                 TEXT NOT NULL,
+            traffic_source_type      TEXT NOT NULL,
+            views                    INTEGER,
+            estimated_minutes_watched REAL,
+            average_view_duration    REAL,
+            PRIMARY KEY (channel, metric_date, video_id, traffic_source_type)
+        )
+    """,
+    "channel_traffic_sources": """
+        CREATE TABLE {name} (
+            metric_date          TEXT NOT NULL,
+            channel              TEXT NOT NULL DEFAULT 'human_workforce',
+            traffic_source_type  TEXT NOT NULL,
+            views                INTEGER,
+            estimated_minutes_watched REAL,
+            PRIMARY KEY (channel, metric_date, traffic_source_type)
+        )
+    """,
+    "ci_video_scores": """
+        CREATE TABLE {name} (
+            scored_at               TEXT NOT NULL,
+            channel                 TEXT NOT NULL DEFAULT 'human_workforce',
+            video_id                TEXT NOT NULL,
+            tier                    TEXT NOT NULL,
+            engagement_score        REAL,
+            evergreen_score         REAL,
+            subscriber_magnet_score REAL,
+            hidden_gem_score        REAL,
+            overall_score           REAL,
+            total_views             INTEGER,
+            watch_rate_pct          REAL,
+            like_rate_pct           REAL,
+            sub_rate_pct            REAL,
+            promotion_ratio         REAL,
+            PRIMARY KEY (channel, scored_at, video_id)
+        )
+    """,
+}
+
 
 @contextmanager
 def get_conn():
@@ -240,9 +389,53 @@ def migrate_add_channel_column(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def migrate_rebuild_composite_keys(conn: sqlite3.Connection) -> None:
+    """Rebuild tables in _COMPOSITE_KEY_REBUILDS so their real PRIMARY KEY/UNIQUE
+    constraint matches the composite (channel, ...) key fetch_metrics.py and
+    content_intelligence/service.py's ON CONFLICT clauses target. Idempotent —
+    tracked via _schema_migrations so it only runs once per database.
+    """
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS _schema_migrations "
+        "(name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
+    )
+    already_applied = conn.execute(
+        "SELECT 1 FROM _schema_migrations WHERE name = 'composite_keys_v1'"
+    ).fetchone()
+    if already_applied:
+        return
+
+    existing_tables = {
+        r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    for table, create_sql_template in _COMPOSITE_KEY_REBUILDS.items():
+        if table not in existing_tables:
+            continue
+        tmp_name = f"{table}__rebuild_tmp"
+        conn.execute(f"DROP TABLE IF EXISTS {tmp_name}")
+        conn.execute(create_sql_template.format(name=tmp_name))
+        # Column order can differ between the old (ALTER TABLE-patched) table
+        # and the new one, so map explicitly by name rather than SELECT * —
+        # a positional copy would silently shuffle values into the wrong columns.
+        cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+        col_list = ", ".join(cols)
+        conn.execute(f"INSERT INTO {tmp_name} ({col_list}) SELECT {col_list} FROM {table}")
+        conn.execute(f"DROP TABLE {table}")
+        conn.execute(f"ALTER TABLE {tmp_name} RENAME TO {table}")
+
+    conn.execute(
+        "INSERT INTO _schema_migrations(name, applied_at) VALUES "
+        "('composite_keys_v1', datetime('now'))"
+    )
+    conn.commit()
+
+
 def init_db():
     with get_conn() as conn:
         migrate_add_channel_column(conn)
+        migrate_rebuild_composite_keys(conn)
         conn.executescript(SCHEMA)
 
 

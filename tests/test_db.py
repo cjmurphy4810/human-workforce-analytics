@@ -3,6 +3,8 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
+from db import migrate_add_channel_column, migrate_rebuild_composite_keys
+
 
 def test_retention_buckets_table_created():
     with tempfile.TemporaryDirectory() as tmp:
@@ -232,4 +234,62 @@ def test_schema_creates_channel_columns(tmp_path):
     ]:
         cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
         assert "channel" in cols, f"{table} missing channel column"
+    conn.close()
+
+
+def test_migrate_rebuild_composite_keys_makes_on_conflict_work_on_legacy_table(tmp_path):
+    """Reproduces the production bug: ALTER TABLE ADD COLUMN adds `channel` but
+    cannot rebuild the PRIMARY KEY, so pre-existing installations kept their old
+    single-column key and every ON CONFLICT(channel, ...) upsert in
+    fetch_metrics.py raised OperationalError against real (pre-migration) data.
+    """
+    db_path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(db_path)
+    # Simulate a pre-multi-channel `videos` table (old single-column PK).
+    conn.execute(
+        "CREATE TABLE videos (video_id TEXT PRIMARY KEY, title TEXT, description TEXT, "
+        "published_at TEXT, duration_seconds INTEGER, thumbnail_url TEXT)"
+    )
+    conn.execute("INSERT INTO videos(video_id, title) VALUES ('vid1', 'Old Title')")
+    conn.commit()
+
+    migrate_add_channel_column(conn)  # adds `channel`, but NOT a composite PK
+
+    # Before the fix, this raises: OperationalError: ON CONFLICT clause does
+    # not match any PRIMARY KEY or UNIQUE constraint.
+    migrate_rebuild_composite_keys(conn)
+
+    conn.execute(
+        "INSERT INTO videos(channel, video_id, title) VALUES ('human_workforce', 'vid1', 'Updated Title') "
+        "ON CONFLICT(channel, video_id) DO UPDATE SET title=excluded.title"
+    )
+    conn.execute(
+        "INSERT INTO videos(channel, video_id, title) VALUES ('club_genius', 'vid1', 'CGS Title') "
+        "ON CONFLICT(channel, video_id) DO UPDATE SET title=excluded.title"
+    )
+    conn.commit()
+
+    rows = conn.execute(
+        "SELECT channel, title FROM videos WHERE video_id='vid1' ORDER BY channel"
+    ).fetchall()
+    assert rows == [("club_genius", "CGS Title"), ("human_workforce", "Updated Title")]
+    conn.close()
+
+
+def test_migrate_rebuild_composite_keys_is_idempotent(tmp_path):
+    db_path = tmp_path / "legacy2.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE videos (video_id TEXT PRIMARY KEY, title TEXT, description TEXT, "
+        "published_at TEXT, duration_seconds INTEGER, thumbnail_url TEXT)"
+    )
+    conn.commit()
+    migrate_add_channel_column(conn)
+    migrate_rebuild_composite_keys(conn)
+    migrate_rebuild_composite_keys(conn)  # must not raise on second run
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(videos)").fetchall()]
+    assert sorted(cols) == sorted(
+        ["channel", "video_id", "title", "description", "published_at",
+         "duration_seconds", "thumbnail_url"]
+    )
     conn.close()
