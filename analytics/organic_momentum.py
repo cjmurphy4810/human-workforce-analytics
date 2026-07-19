@@ -252,26 +252,27 @@ class MomentumScorer:
 # ── DB data builder ───────────────────────────────────────────────────────────
 
 
-def _db_query(db_path: str, sql: str) -> pd.DataFrame:
+def _db_query(db_path: str, sql: str, params: Optional[dict] = None) -> pd.DataFrame:
     p = Path(db_path)
     if not p.exists():
         return pd.DataFrame()
     with sqlite3.connect(str(p)) as conn:
         try:
-            return pd.read_sql_query(sql, conn)
+            return pd.read_sql_query(sql, conn, params=params)
         except Exception:
             return pd.DataFrame()
 
 
-def _compute_growth_stats(db_path: str) -> pd.DataFrame:
+def _compute_growth_stats(db_path: str, channel: str) -> pd.DataFrame:
     """Derive daily view-increment trends from the daily_video_metrics time series."""
     df = _db_query(db_path, """
         SELECT video_id, metric_date,
                CAST(views AS REAL) AS views,
                estimated_minutes_watched / 60.0 AS watch_hours
         FROM daily_video_metrics
+        WHERE channel = :channel
         ORDER BY video_id, metric_date
-    """)
+    """, {"channel": channel})
     if df.empty:
         return pd.DataFrame()
 
@@ -321,12 +322,13 @@ def _compute_growth_stats(db_path: str) -> pd.DataFrame:
     return pd.DataFrame(records) if records else pd.DataFrame()
 
 
-def build_momentum_data(db_path: str) -> list[OrganicMomentumMetrics]:
+def build_momentum_data(db_path: str, channel: str) -> list[OrganicMomentumMetrics]:
     """Load all available data from the DB and return un-scored metrics."""
     vids = _db_query(db_path, """
         SELECT video_id, title, published_at, duration_seconds
         FROM videos
-    """)
+        WHERE channel = :channel
+    """, {"channel": channel})
     if vids.empty:
         return []
 
@@ -339,9 +341,10 @@ def build_momentum_data(db_path: str) -> list[OrganicMomentumMetrics]:
         FROM daily_video_metrics d
         INNER JOIN (
             SELECT video_id, MAX(metric_date) AS latest_date
-            FROM daily_video_metrics GROUP BY video_id
+            FROM daily_video_metrics WHERE channel = :channel GROUP BY video_id
         ) lx ON d.video_id = lx.video_id AND d.metric_date = lx.latest_date
-    """)
+        WHERE d.channel = :channel
+    """, {"channel": channel})
 
     adv = _db_query(db_path, """
         SELECT d.video_id, d.views AS adv_views
@@ -349,13 +352,13 @@ def build_momentum_data(db_path: str) -> list[OrganicMomentumMetrics]:
         INNER JOIN (
             SELECT video_id, MAX(metric_date) AS latest_date
             FROM video_traffic_source_metrics
-            WHERE traffic_source_type = 'ADVERTISING'
+            WHERE traffic_source_type = 'ADVERTISING' AND channel = :channel
             GROUP BY video_id
         ) lx ON d.video_id = lx.video_id AND d.metric_date = lx.latest_date
-        WHERE d.traffic_source_type = 'ADVERTISING'
-    """)
+        WHERE d.traffic_source_type = 'ADVERTISING' AND d.channel = :channel
+    """, {"channel": channel})
 
-    growth = _compute_growth_stats(db_path)
+    growth = _compute_growth_stats(db_path, channel)
 
     df = vids.copy()
     for side, defaults in [
