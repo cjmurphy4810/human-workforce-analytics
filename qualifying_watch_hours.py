@@ -165,18 +165,18 @@ def _build_timeseries(metrics: list[VideoPromotionMetrics]) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 @st.cache_data(ttl=300)
-def _db_query(db_path_str: str, sql: str) -> pd.DataFrame:
+def _db_query(db_path_str: str, sql: str, params: tuple = ()) -> pd.DataFrame:
     db = Path(db_path_str)
     if not db.exists():
         return pd.DataFrame()
     with sqlite3.connect(db) as conn:
         try:
-            return pd.read_sql_query(sql, conn)
+            return pd.read_sql_query(sql, conn, params=params)
         except Exception:
             return pd.DataFrame()
 
 
-def _build_real_metrics(db_path: Path) -> list[VideoPromotionMetrics]:
+def _build_real_metrics(db_path: Path, channel: str) -> list[VideoPromotionMetrics]:
     """Build VideoPromotionMetrics from real DB data.
 
     Promotion watch hours come from insightTrafficSourceType=ADVERTISING via
@@ -189,12 +189,14 @@ def _build_real_metrics(db_path: Path) -> list[VideoPromotionMetrics]:
     If no promotion data exists at all, data_source='NONE' and qualifying hours = total hours.
     """
     vids = _db_query(str(db_path),
-        "SELECT video_id, title, published_at, duration_seconds FROM videos")
+        "SELECT video_id, title, published_at, duration_seconds FROM videos WHERE channel = ?",
+        (channel,))
     if vids.empty:
         return []
 
     snap = _db_query(str(db_path),
-        "SELECT video_id, view_count FROM video_snapshots ORDER BY captured_at")
+        "SELECT video_id, view_count FROM video_snapshots WHERE channel = ? ORDER BY captured_at",
+        (channel,))
     if not snap.empty:
         snap = snap.groupby("video_id", as_index=False).last()[["video_id", "view_count"]]
 
@@ -206,9 +208,11 @@ def _build_real_metrics(db_path: Path) -> list[VideoPromotionMetrics]:
         "FROM daily_video_metrics d "
         "INNER JOIN ("
         "  SELECT video_id, MAX(metric_date) AS latest_date "
-        "  FROM daily_video_metrics GROUP BY video_id"
+        "  FROM daily_video_metrics WHERE channel = ? GROUP BY video_id"
         ") latest ON d.video_id = latest.video_id "
-        "AND d.metric_date = latest.latest_date")
+        "AND d.metric_date = latest.latest_date "
+        "WHERE d.channel = ?",
+        (channel, channel))
 
     # ADVERTISING traffic source watch hours per video (API_ACTUAL)
     adv = _db_query(str(db_path),
@@ -220,11 +224,12 @@ def _build_real_metrics(db_path: Path) -> list[VideoPromotionMetrics]:
         "INNER JOIN ("
         "  SELECT video_id, MAX(metric_date) AS latest_date "
         "  FROM video_traffic_source_metrics "
-        "  WHERE traffic_source_type = 'ADVERTISING' "
+        "  WHERE traffic_source_type = 'ADVERTISING' AND channel = ? "
         "  GROUP BY video_id"
         ") latest ON d.video_id = latest.video_id "
         "AND d.metric_date = latest.latest_date "
-        "WHERE d.traffic_source_type = 'ADVERTISING'")
+        "WHERE d.traffic_source_type = 'ADVERTISING' AND d.channel = ?",
+        (channel, channel))
 
     df = vids.copy()
     if not snap.empty:
@@ -317,7 +322,7 @@ def _build_real_metrics(db_path: Path) -> list[VideoPromotionMetrics]:
     return compute_efficiency_scores(corrected)
 
 
-def _build_real_timeseries(db_path: Path) -> pd.DataFrame:
+def _build_real_timeseries(db_path: Path, channel: str) -> pd.DataFrame:
     """Aggregate real daily_channel_metrics into weekly time-series.
 
     Splits each week's total hours into organic vs promotion using the channel-level
@@ -325,7 +330,8 @@ def _build_real_timeseries(db_path: Path) -> pd.DataFrame:
     """
     df = _db_query(str(db_path),
         "SELECT metric_date, estimated_minutes_watched "
-        "FROM daily_channel_metrics ORDER BY metric_date")
+        "FROM daily_channel_metrics WHERE channel = ? ORDER BY metric_date",
+        (channel,))
     if df.empty:
         return pd.DataFrame()
 
@@ -334,16 +340,19 @@ def _build_real_timeseries(db_path: Path) -> pd.DataFrame:
         "SELECT SUM(d.estimated_minutes_watched/60.0) AS total_wh "
         "FROM daily_video_metrics d "
         "INNER JOIN (SELECT video_id, MAX(metric_date) AS latest_date "
-        "FROM daily_video_metrics GROUP BY video_id) latest "
-        "ON d.video_id=latest.video_id AND d.metric_date=latest.latest_date")
+        "FROM daily_video_metrics WHERE channel = ? GROUP BY video_id) latest "
+        "ON d.video_id=latest.video_id AND d.metric_date=latest.latest_date "
+        "WHERE d.channel = ?",
+        (channel, channel))
     adv_row = _db_query(str(db_path),
         "SELECT SUM(d.estimated_minutes_watched/60.0) AS adv_wh "
         "FROM video_traffic_source_metrics d "
         "INNER JOIN (SELECT video_id, MAX(metric_date) AS latest_date "
-        "FROM video_traffic_source_metrics WHERE traffic_source_type='ADVERTISING' "
+        "FROM video_traffic_source_metrics WHERE traffic_source_type='ADVERTISING' AND channel = ? "
         "GROUP BY video_id) latest "
         "ON d.video_id=latest.video_id AND d.metric_date=latest.latest_date "
-        "WHERE d.traffic_source_type='ADVERTISING'")
+        "WHERE d.traffic_source_type='ADVERTISING' AND d.channel = ?",
+        (channel, channel))
     total_wh = float(total_row["total_wh"].iloc[0] or 0) if not total_row.empty else 0.0
     adv_wh = float(adv_row["adv_wh"].iloc[0] or 0) if not adv_row.empty else 0.0
     promo_ratio = adv_wh / max(total_wh, 1.0)
@@ -359,17 +368,18 @@ def _build_real_timeseries(db_path: Path) -> pd.DataFrame:
     return weekly[["week", "organic_hours", "promotion_hours", "qualifying_hours"]]
 
 
-def _get_qualifying_hours_last_365(db_path: Path) -> float:
+def _get_qualifying_hours_last_365(db_path: Path, channel: str) -> float:
     cutoff = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
     df = _db_query(str(db_path),
-        f"SELECT SUM(estimated_minutes_watched)/60.0 AS hrs "
-        f"FROM daily_channel_metrics WHERE metric_date >= '{cutoff}'")
+        "SELECT SUM(estimated_minutes_watched)/60.0 AS hrs "
+        "FROM daily_channel_metrics WHERE metric_date >= ? AND channel = ?",
+        (cutoff, channel))
     if df.empty or pd.isna(df["hrs"].iloc[0]):
         return 0.0
     return float(df["hrs"].iloc[0])
 
 
-def _get_advertising_watch_hours(db_path: Path) -> tuple[float, bool]:
+def _get_advertising_watch_hours(db_path: Path, channel: str) -> tuple[float, bool]:
     """Return (advertising_watch_hours, has_api_data).
 
     Sums the latest ADVERTISING-source estimated_minutes_watched per video.
@@ -381,20 +391,22 @@ def _get_advertising_watch_hours(db_path: Path) -> tuple[float, bool]:
         "INNER JOIN ("
         "  SELECT video_id, MAX(metric_date) AS latest_date "
         "  FROM video_traffic_source_metrics "
-        "  WHERE traffic_source_type = 'ADVERTISING' "
+        "  WHERE traffic_source_type = 'ADVERTISING' AND channel = ? "
         "  GROUP BY video_id"
         ") latest ON d.video_id = latest.video_id "
         "AND d.metric_date = latest.latest_date "
-        "WHERE d.traffic_source_type = 'ADVERTISING'")
+        "WHERE d.traffic_source_type = 'ADVERTISING' AND d.channel = ?",
+        (channel, channel))
     if df.empty or pd.isna(df["adv_hrs"].iloc[0]):
         return 0.0, False
     return float(df["adv_hrs"].iloc[0]), True
 
 
-def _get_db_date_range(db_path: Path) -> tuple[Optional[str], Optional[str]]:
+def _get_db_date_range(db_path: Path, channel: str) -> tuple[Optional[str], Optional[str]]:
     df = _db_query(str(db_path),
         "SELECT MIN(metric_date) AS earliest, MAX(metric_date) AS latest "
-        "FROM daily_channel_metrics")
+        "FROM daily_channel_metrics WHERE channel = ?",
+        (channel,))
     if df.empty or pd.isna(df["earliest"].iloc[0]):
         return None, None
     return str(df["earliest"].iloc[0]), str(df["latest"].iloc[0])
@@ -729,7 +741,7 @@ def _render_promotion_impact(metrics: list[VideoPromotionMetrics]) -> None:
 # Projections
 # ---------------------------------------------------------------------------
 
-def _render_projections(db_path: Path, qual_ratio: float) -> None:
+def _render_projections(db_path: Path, qual_ratio: float, channel: str) -> None:
     """Show projected qualifying hours under three rate scenarios."""
     import datetime as _dt
     import numpy as np
@@ -739,7 +751,8 @@ def _render_projections(db_path: Path, qual_ratio: float) -> None:
     # Current cumulative qualifying hours (all available history)
     cur_row = _db_query(str(db_path),
         "SELECT SUM(estimated_minutes_watched)/60.0 AS hrs, "
-        "COUNT(*) AS days FROM daily_channel_metrics")
+        "COUNT(*) AS days FROM daily_channel_metrics WHERE channel = ?",
+        (channel,))
     current_total = float(cur_row["hrs"].iloc[0] or 0) if not cur_row.empty else 0.0
     channel_days = int(cur_row["days"].iloc[0] or 1) if not cur_row.empty else 1
     current_qualifying = current_total * qual_ratio
@@ -747,8 +760,9 @@ def _render_projections(db_path: Path, qual_ratio: float) -> None:
     def _avg_rate(lookback_days: int) -> float:
         cutoff = (today - _dt.timedelta(days=lookback_days)).isoformat()
         r = _db_query(str(db_path),
-            f"SELECT AVG(estimated_minutes_watched)/60.0 AS d "
-            f"FROM daily_channel_metrics WHERE metric_date >= '{cutoff}'")
+            "SELECT AVG(estimated_minutes_watched)/60.0 AS d "
+            "FROM daily_channel_metrics WHERE metric_date >= ? AND channel = ?",
+            (cutoff, channel))
         return float(r["d"].iloc[0] or 0) if not r.empty else 0.0
 
     rate_30d = _avg_rate(30) * qual_ratio    # recent (last 30 days)
@@ -898,7 +912,7 @@ def _render_projections(db_path: Path, qual_ratio: float) -> None:
 # Main render function
 # ---------------------------------------------------------------------------
 
-def render(db_path: Path) -> None:
+def render(db_path: Path, channel: str) -> None:
     st.header("Qualifying Watch Hours")
     st.caption(
         "Estimates YouTube Partner Program qualifying watch hours by removing "
@@ -906,7 +920,7 @@ def render(db_path: Path) -> None:
     )
 
     # --- Sidebar: data source & filters ---
-    real_metrics = _build_real_metrics(db_path)
+    real_metrics = _build_real_metrics(db_path, channel)
     has_real_data = len(real_metrics) > 0
 
     with st.sidebar:
@@ -936,11 +950,11 @@ def render(db_path: Path) -> None:
     # --- Load base metrics ---
     if source_mode == "Live Data":
         base_metrics = real_metrics
-        ts = _build_real_timeseries(db_path)
+        ts = _build_real_timeseries(db_path, channel)
         is_demo = False
     elif source_mode == "Upload Promotion CSV" and uploaded_file is not None:
         base_metrics = _try_load_csv(uploaded_file) or real_metrics or _build_demo_metrics()
-        ts = _build_real_timeseries(db_path) if has_real_data else _build_timeseries(base_metrics)
+        ts = _build_real_timeseries(db_path, channel) if has_real_data else _build_timeseries(base_metrics)
         is_demo = False
     else:
         base_metrics = _build_demo_metrics()
@@ -958,9 +972,9 @@ def render(db_path: Path) -> None:
 
     # --- YPP progress (live data only) ---
     if source_mode == "Live Data" and has_real_data:
-        total_365 = _get_qualifying_hours_last_365(db_path)
-        adv_hours, has_adv_data = _get_advertising_watch_hours(db_path)
-        earliest, latest = _get_db_date_range(db_path)
+        total_365 = _get_qualifying_hours_last_365(db_path, channel)
+        adv_hours, has_adv_data = _get_advertising_watch_hours(db_path, channel)
+        earliest, latest = _get_db_date_range(db_path, channel)
         est_qualifying = max(total_365 - adv_hours, 0.0) if has_adv_data else total_365
 
         st.subheader("YouTube Partner Program Progress")
@@ -1201,7 +1215,7 @@ def render(db_path: Path) -> None:
     # --- Projections (live data only) ---
     if source_mode == "Live Data" and has_real_data and total_watch_hrs > 0:
         _qual_ratio_proj = report.estimated_qualifying_hours / max(total_watch_hrs, 1)
-        _render_projections(db_path, _qual_ratio_proj)
+        _render_projections(db_path, _qual_ratio_proj, channel)
 
     # --- Charts ---
     st.subheader("Charts")
