@@ -26,8 +26,12 @@ jobs:
         env:
           YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
           YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
-          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
-          YT_CHANNEL_ID: ${{ secrets.YT_CHANNEL_ID }}
+          YT_CHANNEL_ID_HW: ${{ secrets.YT_CHANNEL_ID_HW }}
+          YT_REFRESH_TOKEN_HW: ${{ secrets.YT_REFRESH_TOKEN_HW }}
+          YT_CHANNEL_ID_CGS: ${{ secrets.YT_CHANNEL_ID_CGS }}
+          YT_REFRESH_TOKEN_CGS: ${{ secrets.YT_REFRESH_TOKEN_CGS }}
+          YT_CHANNEL_ID_KZAK: ${{ secrets.YT_CHANNEL_ID_KZAK }}
+          YT_REFRESH_TOKEN_KZAK: ${{ secrets.YT_REFRESH_TOKEN_KZAK }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           NEWS_API_KEY: ${{ secrets.NEWS_API_KEY }}
         run: python fetch_metrics.py
