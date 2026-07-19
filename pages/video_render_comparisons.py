@@ -7,6 +7,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+from channel_state import render_channel_selector
 from db import DB_PATH
 
 st.set_page_config(page_title="Video Render Comparisons", layout="wide")
@@ -14,6 +15,8 @@ st.set_page_config(page_title="Video Render Comparisons", layout="wide")
 if not st.session_state.get("authenticated"):
     st.switch_page("app.py")
     st.stop()
+
+_active_channel = render_channel_selector()
 
 # ---------------------------------------------------------------------------
 # Fixed render-group → playlist mapping
@@ -39,22 +42,23 @@ _GROUP_COLORS = {
 # ---------------------------------------------------------------------------
 
 @st.cache_data(ttl=300)
-def _load_playlist_videos() -> pd.DataFrame:
+def _load_playlist_videos(channel: str) -> pd.DataFrame:
     """All playlist → video_id memberships (used for group assignment only)."""
     sql = """
     SELECT p.title AS playlist, pv.video_id
     FROM playlists p
-    JOIN playlist_videos pv ON p.playlist_id = pv.playlist_id
+    JOIN playlist_videos pv ON p.playlist_id = pv.playlist_id AND pv.channel = p.channel
+    WHERE p.channel = :channel
     """
     with sqlite3.connect(str(DB_PATH)) as conn:
         try:
-            return pd.read_sql_query(sql, conn)
+            return pd.read_sql_query(sql, conn, params={"channel": channel})
         except Exception:
             return pd.DataFrame()
 
 
 @st.cache_data(ttl=300)
-def _load_all_videos() -> pd.DataFrame:
+def _load_all_videos(channel: str) -> pd.DataFrame:
     """All videos with their latest cumulative metrics snapshot."""
     sql = """
     SELECT
@@ -66,36 +70,39 @@ def _load_all_videos() -> pd.DataFrame:
     FROM videos v
     LEFT JOIN (
         SELECT video_id, MAX(metric_date) AS ld
-        FROM daily_video_metrics GROUP BY video_id
+        FROM daily_video_metrics WHERE channel = :channel GROUP BY video_id
     ) latest ON v.video_id = latest.video_id
     LEFT JOIN daily_video_metrics dvm
-        ON dvm.video_id = v.video_id AND dvm.metric_date = latest.ld
+        ON dvm.video_id = v.video_id AND dvm.metric_date = latest.ld AND dvm.channel = :channel
+    WHERE v.channel = :channel
     """
     with sqlite3.connect(str(DB_PATH)) as conn:
         try:
-            return pd.read_sql_query(sql, conn)
+            return pd.read_sql_query(sql, conn, params={"channel": channel})
         except Exception:
             return pd.DataFrame()
 
 
 @st.cache_data(ttl=300)
-def _qual_ratio() -> float:
+def _qual_ratio(channel: str) -> float:
     try:
         with sqlite3.connect(str(DB_PATH)) as conn:
             total = conn.execute(
                 "SELECT SUM(d.estimated_minutes_watched/60.0) FROM daily_video_metrics d "
                 "INNER JOIN (SELECT video_id, MAX(metric_date) AS ld "
-                "FROM daily_video_metrics GROUP BY video_id) l "
-                "ON d.video_id=l.video_id AND d.metric_date=l.ld"
+                "FROM daily_video_metrics WHERE channel = ? GROUP BY video_id) l "
+                "ON d.video_id=l.video_id AND d.metric_date=l.ld WHERE d.channel = ?",
+                (channel, channel),
             ).fetchone()[0] or 0.0
             adv = conn.execute(
                 "SELECT SUM(d.estimated_minutes_watched/60.0) "
                 "FROM video_traffic_source_metrics d "
                 "INNER JOIN (SELECT video_id, MAX(metric_date) AS ld "
                 "FROM video_traffic_source_metrics "
-                "WHERE traffic_source_type='ADVERTISING' GROUP BY video_id) l "
+                "WHERE traffic_source_type='ADVERTISING' AND channel = ? GROUP BY video_id) l "
                 "ON d.video_id=l.video_id AND d.metric_date=l.ld "
-                "WHERE d.traffic_source_type='ADVERTISING'"
+                "WHERE d.traffic_source_type='ADVERTISING' AND d.channel = ?",
+                (channel, channel),
             ).fetchone()[0] or 0.0
         return max(total - adv, 0.0) / max(total, 1.0)
     except Exception:
@@ -142,9 +149,9 @@ def _dur(sec: float) -> str:
 # Load data + assign groups
 # ---------------------------------------------------------------------------
 
-pv       = _load_playlist_videos()
-all_vids = _load_all_videos()
-ratio    = _qual_ratio()
+pv       = _load_playlist_videos(_active_channel)
+all_vids = _load_all_videos(_active_channel)
+ratio    = _qual_ratio(_active_channel)
 
 st.header("Video Render Comparisons")
 
