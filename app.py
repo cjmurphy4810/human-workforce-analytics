@@ -15,6 +15,7 @@ import json
 
 import projections
 import retention
+from channel_state import CHANNELS, render_channel_selector
 
 DB_PATH = Path(__file__).parent / "data.db"
 
@@ -57,14 +58,17 @@ with st.sidebar:
 if _active_section == "Qualifying Watch Hours":
     st.switch_page("pages/qualifying_watch_hours.py")
 
+active_channel = render_channel_selector()
+st.title(f"🎙️ {CHANNELS[active_channel]} Analytics")
+
 
 @st.cache_data(ttl=300)
-def load(query: str) -> pd.DataFrame:
+def load(query: str, params: dict | None = None) -> pd.DataFrame:
     if not DB_PATH.exists():
         return pd.DataFrame()
     with sqlite3.connect(DB_PATH) as conn:
         try:
-            return pd.read_sql_query(query, conn)
+            return pd.read_sql_query(query, conn, params=params or {})
         except Exception:
             return pd.DataFrame()
 
@@ -107,40 +111,52 @@ def filter_days(df: pd.DataFrame, date_col: str, days: int) -> pd.DataFrame:
 
 channel_snapshots = load(
     "SELECT captured_at, subscriber_count, view_count, video_count "
-    "FROM channel_snapshots ORDER BY captured_at"
+    "FROM channel_snapshots WHERE channel = :channel ORDER BY captured_at",
+    {"channel": active_channel},
 )
 daily_channel = load(
     "SELECT metric_date, views, estimated_minutes_watched, "
-    "subscribers_gained, subscribers_lost FROM daily_channel_metrics ORDER BY metric_date"
+    "subscribers_gained, subscribers_lost FROM daily_channel_metrics "
+    "WHERE channel = :channel ORDER BY metric_date",
+    {"channel": active_channel},
 )
 videos = load(
-    "SELECT video_id, title, published_at, duration_seconds, thumbnail_url FROM videos"
+    "SELECT video_id, title, published_at, duration_seconds, thumbnail_url "
+    "FROM videos WHERE channel = :channel",
+    {"channel": active_channel},
 )
 video_snapshots = load(
     "SELECT captured_at, video_id, view_count, like_count, comment_count "
-    "FROM video_snapshots ORDER BY captured_at"
+    "FROM video_snapshots WHERE channel = :channel ORDER BY captured_at",
+    {"channel": active_channel},
 )
 daily_videos = load(
     "SELECT metric_date, video_id, views, estimated_minutes_watched, "
-    "average_view_duration, likes FROM daily_video_metrics"
+    "average_view_duration, likes FROM daily_video_metrics WHERE channel = :channel",
+    {"channel": active_channel},
 )
 retention_buckets = load(
     "SELECT video_id, window_start, window_end, window_kind, views, "
-    "retention_at_25, retention_at_75 FROM retention_buckets"
+    "retention_at_25, retention_at_75 FROM retention_buckets WHERE channel = :channel",
+    {"channel": active_channel},
 )
 publishing_queue = load(
     "SELECT analyzed_at, videos_analyzed, news_stories_count, result_json "
-    "FROM publishing_queue ORDER BY analyzed_at DESC LIMIT 1"
+    "FROM publishing_queue WHERE channel = :channel ORDER BY analyzed_at DESC LIMIT 1",
+    {"channel": active_channel},
 )
 daily_geo = load(
     "SELECT metric_date, country_code, views, subscribers_gained, likes "
-    "FROM daily_geo_metrics ORDER BY metric_date"
+    "FROM daily_geo_metrics WHERE channel = :channel ORDER BY metric_date",
+    {"channel": active_channel},
 )
 playlists_df = load(
-    "SELECT playlist_id, title, item_count FROM playlists"
+    "SELECT playlist_id, title, item_count FROM playlists WHERE channel = :channel",
+    {"channel": active_channel},
 )
 playlist_videos_df = load(
-    "SELECT playlist_id, video_id FROM playlist_videos"
+    "SELECT playlist_id, video_id FROM playlist_videos WHERE channel = :channel",
+    {"channel": active_channel},
 )
 queue_recommendations_df = load(
     "SELECT qr.video_id, qr.first_recommended_at, qr.recommended_publish_date, "
@@ -148,22 +164,26 @@ queue_recommendations_df = load(
     "v.title, v.published_at, "
     "COUNT(dvm.metric_date) AS data_days "
     "FROM queue_recommendations qr "
-    "JOIN videos v ON qr.video_id = v.video_id "
+    "JOIN videos v ON qr.video_id = v.video_id AND v.channel = qr.channel "
     "LEFT JOIN daily_video_metrics dvm "
-    "  ON dvm.video_id = qr.video_id "
+    "  ON dvm.video_id = qr.video_id AND dvm.channel = qr.channel "
     "  AND dvm.metric_date >= date(v.published_at) "
-    "WHERE v.published_at IS NOT NULL "
+    "WHERE v.published_at IS NOT NULL AND qr.channel = :channel "
     "GROUP BY qr.video_id "
-    "HAVING COUNT(dvm.metric_date) >= 3"
+    "HAVING COUNT(dvm.metric_date) >= 3",
+    {"channel": active_channel},
 )
 cohort_daily_metrics = load(
     "SELECT metric_date, video_id, views, estimated_minutes_watched, subscribers_gained "
-    "FROM daily_video_metrics"
+    "FROM daily_video_metrics WHERE channel = :channel",
+    {"channel": active_channel},
 )
 channel_traffic = load(
     "SELECT traffic_source_type, SUM(views) AS views, "
     "SUM(estimated_minutes_watched) / 60.0 AS hours "
-    "FROM channel_traffic_sources GROUP BY traffic_source_type ORDER BY views DESC"
+    "FROM channel_traffic_sources WHERE channel = :channel "
+    "GROUP BY traffic_source_type ORDER BY views DESC",
+    {"channel": active_channel},
 )
 video_engagement = load(
     "SELECT d.video_id, v.title, v.duration_seconds, "
@@ -171,19 +191,18 @@ video_engagement = load(
     "d.average_view_duration, d.likes, d.subscribers_gained "
     "FROM daily_video_metrics d "
     "INNER JOIN (SELECT video_id, MAX(metric_date) AS latest_date "
-    "            FROM daily_video_metrics GROUP BY video_id) latest "
+    "            FROM daily_video_metrics WHERE channel = :channel GROUP BY video_id) latest "
     "ON d.video_id = latest.video_id AND d.metric_date = latest.latest_date "
-    "LEFT JOIN videos v ON d.video_id = v.video_id "
-    "WHERE d.views > 0"
+    "LEFT JOIN videos v ON d.video_id = v.video_id AND v.channel = :channel "
+    "WHERE d.views > 0 AND d.channel = :channel",
+    {"channel": active_channel},
 )
 
 if channel_snapshots.empty:
-    st.title("🎙️ Human Workforce Analytics")
     st.warning("No data yet. Run `python fetch_metrics.py` or wait for the first scheduled fetch.")
     st.stop()
 
 
-st.title("🎙️ Human Workforce Analytics")
 latest = channel_snapshots.iloc[-1]
 prev = channel_snapshots.iloc[-2] if len(channel_snapshots) > 1 else latest
 
@@ -442,8 +461,10 @@ if not daily_channel.empty:
                 "FROM daily_video_metrics d "
                 "INNER JOIN ("
                 "  SELECT video_id, MAX(metric_date) AS latest_date "
-                "  FROM daily_video_metrics GROUP BY video_id"
-                ") latest ON d.video_id=latest.video_id AND d.metric_date=latest.latest_date"
+                "  FROM daily_video_metrics WHERE channel = ? GROUP BY video_id"
+                ") latest ON d.video_id=latest.video_id AND d.metric_date=latest.latest_date "
+                "WHERE d.channel = ?",
+                (active_channel, active_channel),
             ).fetchone()[0] or 0.0
             _adv_wh = _c.execute(
                 "SELECT SUM(d.estimated_minutes_watched/60.0) "
@@ -451,9 +472,10 @@ if not daily_channel.empty:
                 "INNER JOIN ("
                 "  SELECT video_id, MAX(metric_date) AS latest_date "
                 "  FROM video_traffic_source_metrics "
-                "  WHERE traffic_source_type='ADVERTISING' GROUP BY video_id"
+                "  WHERE traffic_source_type='ADVERTISING' AND channel = ? GROUP BY video_id"
                 ") latest ON d.video_id=latest.video_id AND d.metric_date=latest.latest_date "
-                "WHERE d.traffic_source_type='ADVERTISING'"
+                "WHERE d.traffic_source_type='ADVERTISING' AND d.channel = ?",
+                (active_channel, active_channel),
             ).fetchone()[0] or 0.0
         _qual_ratio = max(_total_wh - _adv_wh, 0.0) / max(_total_wh, 1.0)
         _promo_ratio = 1.0 - _qual_ratio
