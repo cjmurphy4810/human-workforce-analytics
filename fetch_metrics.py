@@ -59,6 +59,11 @@ CHANNEL_CONFIGS = [
         "channel_id_env": "YT_CHANNEL_ID_KZAK",
         "refresh_token_env": "YT_REFRESH_TOKEN_KZAK",
     },
+    {
+        "key": "techy_chef_tips",
+        "channel_id_env": "YT_CHANNEL_ID_TCT",
+        "refresh_token_env": "YT_REFRESH_TOKEN_TCT",
+    },
 ]
 
 

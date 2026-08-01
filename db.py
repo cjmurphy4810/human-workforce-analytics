@@ -5,7 +5,7 @@ from pathlib import Path
 DB_PATH = Path(__file__).parent / "data.db"
 
 DEFAULT_CHANNEL = "human_workforce"
-CHANNELS = ("human_workforce", "club_genius", "kzak")
+CHANNELS = ("human_workforce", "club_genius", "kzak", "techy_chef_tips")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS channel_snapshots (
