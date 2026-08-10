@@ -2,8 +2,11 @@ name: Fetch YouTube Analytics
 
 on:
   schedule:
-    # Every 4 hours at :00 UTC (00, 04, 08, 12, 16, 20)
-    - cron: "0 */4 * * *"
+    # Once daily at 06:00 UTC. Was every 4 hours (6 runs/day); the per-video API call
+    # loops (traffic-source + retention-window fetches, across 4 channels) were pushing
+    # the YouTube Data/Analytics API daily quota to exhaustion. Daily cuts total call
+    # volume ~6x. Adjust the hour freely — it's arbitrary, not tied to any other gotcha.
+    - cron: "0 6 * * *"
   workflow_dispatch:
 
 permissions:
