@@ -379,6 +379,46 @@ def _get_qualifying_hours_last_365(db_path: Path, channel: str) -> float:
     return float(df["hrs"].iloc[0])
 
 
+def _get_shorts_watch_hours(db_path: Path, channel: str) -> float:
+    """Sum the latest per-video *non-ADVERTISING* watch hours for videos <=180s (Shorts).
+
+    Shorts watch time never counts toward the YPP watch-hours requirement, regardless
+    of whether it was organic or promoted — but a Short's ADVERTISING-sourced hours are
+    already netted out by _get_advertising_watch_hours(). Subtracting a Short's full
+    total here on top of that would double-count the overlap for any Short that also
+    ran paid promotion, so this returns only each Short's non-ADVERTISING remainder
+    (total minus that video's own ADVERTISING hours, floored at 0).
+
+    Uses each video's most recent daily_video_metrics / video_traffic_source_metrics
+    snapshot (lifetime-to-date cumulative figures), so this is a lifetime Shorts total
+    rather than a strict last-365-days figure — acceptable while the channel is younger
+    than 365 days (see _get_qualifying_hours_last_365).
+    """
+    df = _db_query(str(db_path),
+        "SELECT SUM(MAX(d.estimated_minutes_watched/60.0 - COALESCE(adv.adv_wh, 0), 0)) AS shorts_hrs "
+        "FROM daily_video_metrics d "
+        "INNER JOIN videos v ON v.channel = d.channel AND v.video_id = d.video_id "
+        "INNER JOIN ("
+        "  SELECT video_id, MAX(metric_date) AS latest_date "
+        "  FROM daily_video_metrics WHERE channel = ? GROUP BY video_id"
+        ") latest ON d.video_id = latest.video_id AND d.metric_date = latest.latest_date "
+        "LEFT JOIN ("
+        "  SELECT t.video_id, t.estimated_minutes_watched/60.0 AS adv_wh "
+        "  FROM video_traffic_source_metrics t "
+        "  INNER JOIN ("
+        "    SELECT video_id, MAX(metric_date) AS latest_date "
+        "    FROM video_traffic_source_metrics "
+        "    WHERE traffic_source_type = 'ADVERTISING' AND channel = ? GROUP BY video_id"
+        "  ) latest_adv ON t.video_id = latest_adv.video_id AND t.metric_date = latest_adv.latest_date "
+        "  WHERE t.traffic_source_type = 'ADVERTISING' AND t.channel = ?"
+        ") adv ON adv.video_id = d.video_id "
+        "WHERE d.channel = ? AND v.duration_seconds > 0 AND v.duration_seconds <= 180",
+        (channel, channel, channel, channel))
+    if df.empty or pd.isna(df["shorts_hrs"].iloc[0]):
+        return 0.0
+    return float(df["shorts_hrs"].iloc[0])
+
+
 def _get_advertising_watch_hours(db_path: Path, channel: str) -> tuple[float, bool]:
     """Return (advertising_watch_hours, has_api_data).
 
@@ -748,11 +788,15 @@ def _render_projections(db_path: Path, qual_ratio: float, channel: str) -> None:
 
     today = _dt.date.today()
 
-    # Current cumulative qualifying hours (all available history)
+    # Current cumulative qualifying hours over the trailing 365 days — matches YPP's
+    # actual rolling-window rule. While the channel is younger than 365 days this equals
+    # its full history; once it passes the 1-year mark, an unbounded SUM would keep
+    # counting hours YouTube has already rolled off the eligibility window.
+    year_cutoff = (today - _dt.timedelta(days=365)).isoformat()
     cur_row = _db_query(str(db_path),
         "SELECT SUM(estimated_minutes_watched)/60.0 AS hrs, "
-        "COUNT(*) AS days FROM daily_channel_metrics WHERE channel = ?",
-        (channel,))
+        "COUNT(*) AS days FROM daily_channel_metrics WHERE channel = ? AND metric_date >= ?",
+        (channel, year_cutoff))
     current_total = float(cur_row["hrs"].iloc[0] or 0) if not cur_row.empty else 0.0
     channel_days = int(cur_row["days"].iloc[0] or 1) if not cur_row.empty else 1
     current_qualifying = current_total * qual_ratio
@@ -974,20 +1018,20 @@ def render(db_path: Path, channel: str) -> None:
     if source_mode == "Live Data" and has_real_data:
         total_365 = _get_qualifying_hours_last_365(db_path, channel)
         adv_hours, has_adv_data = _get_advertising_watch_hours(db_path, channel)
+        shorts_hours = _get_shorts_watch_hours(db_path, channel)
         earliest, latest = _get_db_date_range(db_path, channel)
-        est_qualifying = max(total_365 - adv_hours, 0.0) if has_adv_data else total_365
+        est_qualifying = max(total_365 - adv_hours - shorts_hours, 0.0) if has_adv_data else max(total_365 - shorts_hours, 0.0)
 
         st.subheader("YouTube Partner Program Progress")
 
         if has_adv_data:
-            ypp_col1, ypp_col2, ypp_col3, ypp_col4 = st.columns(4)
+            ypp_col1, ypp_col2, ypp_col3, ypp_col4, ypp_col5 = st.columns(5)
             ypp_col1.metric(
                 "Total Watch Hours",
                 f"{total_365:,.0f} hrs",
                 delta=f"{earliest} → {latest}" if earliest else None,
                 delta_color="off",
-                help="Sum of daily_channel_metrics — includes Shorts. "
-                     "YouTube's YPP meter counts only public long-form videos.",
+                help="Sum of daily_channel_metrics — includes Shorts and paid promotion.",
             )
             ypp_col2.metric(
                 "Promotion (ADVERTISING)",
@@ -995,23 +1039,30 @@ def render(db_path: Path, channel: str) -> None:
                 delta="API_ACTUAL",
                 delta_color="off",
                 help="Sum of insightTrafficSourceType=ADVERTISING minutes watched / 60 "
-                     "across all videos (latest fetch). These hours do not count toward YPP.",
+                     "across all videos, lifetime-to-date. These hours do not count toward YPP.",
             )
             ypp_col3.metric(
-                "Est. Qualifying Hours",
-                f"{est_qualifying:,.0f} hrs",
-                help="Total watch hours minus ADVERTISING traffic source watch hours. "
-                     "Still includes Shorts — check YouTube Studio → Earn for the exact YPP count.",
+                "Shorts (excluded)",
+                f"−{shorts_hours:,.0f} hrs",
+                delta_color="off",
+                help="Watch hours on videos ≤180s, lifetime-to-date. Shorts never count "
+                     "toward the YPP watch-hours requirement, promoted or not.",
             )
             ypp_col4.metric(
+                "Est. Qualifying Hours",
+                f"{est_qualifying:,.0f} hrs",
+                help="Total watch hours minus ADVERTISING watch hours minus Shorts watch hours.",
+            )
+            ypp_col5.metric(
                 "YPP Threshold",
                 f"{_YPP_WATCH_HOURS_THRESHOLD:,} hrs",
                 help="YouTube Partner Program requires 3,000 valid public watch hours in the last 365 days.",
             )
             st.progress(min(est_qualifying / _YPP_WATCH_HOURS_THRESHOLD, 1.0))
             st.caption(
-                f"Est. qualifying = {total_365:,.0f} total − {adv_hours:,.0f} ADVERTISING = **{est_qualifying:,.0f} hrs** (API_ACTUAL). "
-                "May still include Shorts watch time. Verify in **YouTube Studio → Earn**."
+                f"Est. qualifying = {total_365:,.0f} total − {adv_hours:,.0f} ADVERTISING − {shorts_hours:,.0f} Shorts "
+                f"= **{est_qualifying:,.0f} hrs** (API_ACTUAL). Verify in **YouTube Studio → Earn** — YouTube's own "
+                "eligibility figure may still differ (e.g. Content ID claims, reused/duplicate content)."
             )
 
             st.markdown("---")
@@ -1033,51 +1084,60 @@ def render(db_path: Path, channel: str) -> None:
             )
             st.progress(min(est_qualifying / _BONUS_THRESHOLD, 1.0))
         else:
-            ypp_col1, ypp_col2, ypp_col3 = st.columns(3)
+            ypp_col1, ypp_col2, ypp_col3, ypp_col4 = st.columns(4)
             ypp_col1.metric(
                 "Total Watch Hours (DB)",
                 f"{total_365:,.0f} hrs",
                 delta=f"covers {earliest} → {latest}" if earliest else None,
                 delta_color="off",
-                help="Sum of daily_channel_metrics — includes Shorts watch time.",
+                help="Sum of daily_channel_metrics.",
             )
             ypp_col2.metric(
+                "Shorts (excluded)",
+                f"−{shorts_hours:,.0f} hrs",
+                delta_color="off",
+                help="Watch hours on videos ≤180s, lifetime-to-date. Shorts never count "
+                     "toward the YPP watch-hours requirement.",
+            )
+            ypp_col3.metric(
+                "Est. Qualifying Hours",
+                f"{est_qualifying:,.0f} hrs",
+                help="Total watch hours minus Shorts watch hours. No ADVERTISING data yet, "
+                     "so promotion watch time is not netted out — this will overstate "
+                     "qualifying hours for any promoted channel.",
+            )
+            ypp_col4.metric(
                 "YPP Watch Hours Threshold",
                 f"{_YPP_WATCH_HOURS_THRESHOLD:,} hrs",
                 help="YouTube Partner Program requires 3,000 valid public watch hours in the last 365 days.",
             )
-            ypp_col3.metric(
-                "Per YouTube Studio",
-                "Check Earn tab",
-                help="YouTube Studio → Earn shows the exact 'valid public watch hours' excluding Shorts.",
-            )
-            st.progress(min(total_365 / _YPP_WATCH_HOURS_THRESHOLD, 1.0))
+            st.progress(min(est_qualifying / _YPP_WATCH_HOURS_THRESHOLD, 1.0))
             st.info(
                 "ADVERTISING watch time data not yet available. "
                 "Run the fetch job to populate `video_traffic_source_metrics` — "
-                "qualifying hours will then be computed as **total − ADVERTISING**.",
+                "qualifying hours will then also net out promotion watch time.",
                 icon="ℹ",
             )
             st.caption(
-                "⚠ This total **includes Shorts** watch time. "
+                "⚠ Est. qualifying above excludes Shorts but not promotion watch time yet. "
                 "For the exact YPP-eligible count, check **YouTube Studio → Earn**."
             )
 
             st.markdown("---")
             st.markdown("**12-Month Growth Target: 4,000 hrs**")
             bon_c1, bon_c2, bon_c3 = st.columns(3)
-            bon_c1.metric("Total Watch Hours (DB)", f"{total_365:,.0f} hrs")
+            bon_c1.metric("Est. Qualifying Hours", f"{est_qualifying:,.0f} hrs")
             bon_c2.metric(
                 "12-Month Target",
                 f"{_BONUS_THRESHOLD:,} hrs",
                 help="Internal growth target: 4,000 qualifying watch hours within 12 months of channel launch.",
             )
-            _gap_4k = max(_BONUS_THRESHOLD - total_365, 0.0)
+            _gap_4k = max(_BONUS_THRESHOLD - est_qualifying, 0.0)
             bon_c3.metric(
                 "Gap to Target",
                 f"{_gap_4k:,.0f} hrs remaining" if _gap_4k > 0 else "Target reached ✅",
             )
-            st.progress(min(total_365 / _BONUS_THRESHOLD, 1.0))
+            st.progress(min(est_qualifying / _BONUS_THRESHOLD, 1.0))
 
     # --- Sidebar filters ---
     all_campaigns = sorted({m.campaign for m in base_metrics if m.campaign})
@@ -1215,6 +1275,12 @@ def render(db_path: Path, channel: str) -> None:
     # --- Projections (live data only) ---
     if source_mode == "Live Data" and has_real_data and total_watch_hrs > 0:
         _qual_ratio_proj = report.estimated_qualifying_hours / max(total_watch_hrs, 1)
+        # Fold in the Shorts exclusion so this panel's "current qualifying hours" baseline
+        # agrees with the YPP Progress panel above it, which nets out Shorts explicitly.
+        _shorts_hours_proj = _get_shorts_watch_hours(db_path, channel)
+        _total_365_proj = _get_qualifying_hours_last_365(db_path, channel)
+        if _total_365_proj > 0:
+            _qual_ratio_proj *= max(1 - _shorts_hours_proj / _total_365_proj, 0.0)
         _render_projections(db_path, _qual_ratio_proj, channel)
 
     # --- Charts ---

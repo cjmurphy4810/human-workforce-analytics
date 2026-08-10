@@ -253,9 +253,15 @@ def run_for_channel(channel_key: str, channel_id_env: str, refresh_token_env: st
         print(f"  channel traffic sources failed ({e.__class__.__name__}: {e}), skipping.")
         channel_traffic = []
 
-    print(f"[{channel_key}] Fetching ADVERTISING traffic source metrics for {len(video_ids)} videos {start} -> {end}...")
+    # Lifetime window (not the trailing 90-day `start`) — this must match the window
+    # used for daily_video's per-video total_watch_hours (also video_start..end) so
+    # qualifying_watch_hours.py can subtract ADVERTISING hours from total hours on an
+    # apples-to-apples basis. Fetching only the last 90 days here systematically
+    # under-subtracted promotion watch time against a lifetime total, which is why the
+    # dashboard showed qualifying hours far above YouTube Studio's real Earn-tab number.
+    print(f"[{channel_key}] Fetching ADVERTISING traffic source metrics for {len(video_ids)} videos {video_start} -> {end}...")
     try:
-        traffic_source = fetch_video_traffic_source_metrics(video_ids, start, end, channel_id)
+        traffic_source = fetch_video_traffic_source_metrics(video_ids, video_start, end, channel_id)
         print(f"  {len(traffic_source)} videos had ADVERTISING traffic.")
     except Exception as e:
         print(f"  traffic source metrics failed ({e.__class__.__name__}: {e}), skipping.")
