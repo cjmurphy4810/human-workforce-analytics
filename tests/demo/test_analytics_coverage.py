@@ -48,6 +48,76 @@ def test_qualifying_hours_have_paid_and_organic_inputs():
     assert len(types - {"ADVERTISING"}) >= 3
 
 
+def test_content_intelligence_inputs_cover_every_ui_tier_and_asset_variety():
+    expected_tiers = {
+        "top_episode",
+        "subscriber_magnet",
+        "hidden_gem",
+        "average",
+        "underperformer",
+    }
+    with sqlite3.connect(DEMO_DB_PATH) as conn:
+        tiers = {
+            row[0]
+            for row in conn.execute(
+                "SELECT DISTINCT tier FROM ci_video_scores WHERE channel = ?",
+                (DEMO_CHANNEL_KEY,),
+            )
+        }
+        asset_types = {
+            row[0]
+            for row in conn.execute(
+                "SELECT DISTINCT asset_type FROM ci_content_assets WHERE channel = ?",
+                (DEMO_CHANNEL_KEY,),
+            )
+        }
+
+    assert tiers == expected_tiers
+    assert len(asset_types) >= 2
+
+
+def test_render_comparison_playlists_have_enough_videos():
+    expected_playlists = {
+        "Engineering Shorts",
+        "Visual Engineering Briefings",
+        "Deep-Dive Workshops",
+        "Studio Originals",
+    }
+    with sqlite3.connect(DEMO_DB_PATH) as conn:
+        counts = dict(
+            conn.execute(
+                "SELECT p.title, COUNT(*) "
+                "FROM playlists p "
+                "JOIN playlist_videos pv "
+                "ON pv.channel = p.channel AND pv.playlist_id = p.playlist_id "
+                "WHERE p.channel = ? AND p.title IN (?, ?, ?, ?) "
+                "GROUP BY p.title",
+                (DEMO_CHANNEL_KEY, *sorted(expected_playlists)),
+            )
+        )
+
+    assert set(counts) == expected_playlists
+    assert all(count >= 4 for count in counts.values())
+
+
+def test_promotion_inputs_include_advertised_and_organic_only_videos():
+    with sqlite3.connect(DEMO_DB_PATH) as conn:
+        promotion_flags = {
+            row[0]
+            for row in conn.execute(
+                "SELECT CASE WHEN EXISTS ("
+                "SELECT 1 FROM video_traffic_source_metrics t "
+                "WHERE t.channel = v.channel AND t.video_id = v.video_id "
+                "AND t.traffic_source_type = 'ADVERTISING'"
+                ") THEN 1 ELSE 0 END AS advertised "
+                "FROM videos v WHERE v.channel = ?",
+                (DEMO_CHANNEL_KEY,),
+            )
+        }
+
+    assert promotion_flags == {0, 1}
+
+
 def test_query_frame_returns_an_empty_frame_for_invalid_sql():
     result = query_frame(
         "SELECT missing_column FROM daily_channel_metrics WHERE channel = :channel",

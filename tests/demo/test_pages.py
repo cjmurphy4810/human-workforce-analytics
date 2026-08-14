@@ -32,3 +32,18 @@ def test_core_demo_pages_use_demo_data_boundary():
 def test_qualifying_demo_explicitly_uses_increment_storage_contract():
     source = (DEMO_ROOT / "pages" / "qualifying_watch_hours.py").read_text()
     assert "daily_metrics_are_increments=True" in source
+
+
+def test_advanced_demo_pages_use_demo_data_boundary():
+    names = (
+        "organic_momentum.py",
+        "promotion_intelligence.py",
+        "content_intelligence.py",
+        "video_render_comparisons.py",
+    )
+    for name in names:
+        source = (DEMO_ROOT / "pages" / name).read_text()
+        assert "demo.config" in source
+        assert "from db import DB_PATH" not in source
+        assert "from channel_state" not in source
+        assert "authenticated" not in source
