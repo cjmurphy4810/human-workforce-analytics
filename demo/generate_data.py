@@ -101,13 +101,50 @@ _EPISODES = {
     ),
 }
 
-_TRAFFIC_SOURCES = (
-    ("YT_SEARCH", 32),
+_ORGANIC_TRAFFIC_SOURCES = (
+    ("YT_SEARCH", 35),
+    ("RELATED_VIDEO", 30),
+    ("BROWSE_FEATURES", 25),
+    ("EXTERNAL", 10),
+)
+_PROMOTED_TRAFFIC_SOURCES = (
+    ("YT_SEARCH", 30),
     ("RELATED_VIDEO", 27),
-    ("BROWSE_FEATURES", 24),
-    ("EXTERNAL", 12),
+    ("BROWSE_FEATURES", 23),
+    ("EXTERNAL", 15),
     ("ADVERTISING", 5),
 )
+_REQUIRED_TRAFFIC_SOURCES = {
+    source for source, _ in _PROMOTED_TRAFFIC_SOURCES
+}
+_RETENTION_WINDOWS = (
+    (7, "rolling7"),
+    (30, "rolling30"),
+    (90, "rolling90"),
+    (365, "rolling365"),
+)
+_CANONICAL_CI_TIERS = {
+    "top_episode",
+    "subscriber_magnet",
+    "hidden_gem",
+    "average",
+    "underperformer",
+}
+_VALID_ASSET_TYPES = {
+    "community_post",
+    "executive_poll",
+    "quote_card",
+    "executive_tip",
+    "discussion_question",
+    "linkedin_post",
+    "blog_outline",
+    "newsletter_summary",
+    "course_lesson",
+    "assessment_question",
+    "infographic_text",
+    "image_prompt",
+    "short_video_hook",
+}
 _GEOGRAPHIES = (("US", 58), ("IN", 14), ("GB", 11), ("CA", 9), ("DE", 8))
 _CHANNEL_TABLES = (
     "channel_snapshots",
@@ -158,19 +195,46 @@ def _catalog() -> list[dict[str, object]]:
     return sorted(catalog, key=lambda item: str(item["video_id"]))
 
 
-def _split(total: int, weighted_keys: tuple[tuple[str, int], ...]) -> dict[str, int]:
-    result: dict[str, int] = {}
-    remaining = total
-    for key, weight in weighted_keys[:-1]:
-        value = total * weight // 100
-        result[key] = value
-        remaining -= value
-    result[weighted_keys[-1][0]] = remaining
+def _split(
+    total: int,
+    weighted_keys: tuple[tuple[str, int], ...],
+    *,
+    residual_key: str | None = None,
+) -> dict[str, int]:
+    result = {key: total * weight // 100 for key, weight in weighted_keys}
+    residual_key = residual_key or weighted_keys[-1][0]
+    result[residual_key] += total - sum(result.values())
     return result
 
 
 def _insert_many(conn: sqlite3.Connection, sql: str, rows: list[tuple]) -> None:
     conn.executemany(sql, sorted(rows))
+
+
+def _percentile_ranks(values: dict[str, float]) -> dict[str, float]:
+    ordered = sorted(values.values())
+    denominator = max(len(ordered) - 1, 1)
+    return {
+        video_id: ordered.index(value) / denominator * 100
+        for video_id, value in values.items()
+    }
+
+
+def _classify_ci_tier(
+    overall: float,
+    views_percentile: float,
+    subscriber_magnet: float,
+    hidden_gem: float,
+) -> str:
+    if overall >= 70 and views_percentile >= 60:
+        return "top_episode"
+    if subscriber_magnet >= 70:
+        return "subscriber_magnet"
+    if hidden_gem >= 65 and views_percentile < 40:
+        return "hidden_gem"
+    if overall >= 30:
+        return "average"
+    return "underperformer"
 
 
 def build_demo_database(path: Path, *, seed: int = 8142026) -> None:
@@ -227,7 +291,10 @@ def build_demo_database(path: Path, *, seed: int = 8142026) -> None:
         )
 
     cumulative_views: defaultdict[str, int] = defaultdict(int)
+    cumulative_minutes: defaultdict[str, float] = defaultdict(float)
     cumulative_likes: defaultdict[str, int] = defaultdict(int)
+    cumulative_video_subscribers: defaultdict[str, int] = defaultdict(int)
+    cumulative_ad_views: defaultdict[str, int] = defaultdict(int)
     cumulative_comments: defaultdict[str, int] = defaultdict(int)
     cumulative_subscribers = 0
     cumulative_channel_views = 0
@@ -284,14 +351,44 @@ def build_demo_database(path: Path, *, seed: int = 8142026) -> None:
             day_likes += likes
             day_subscribers += subscribers
             cumulative_views[str(item["video_id"])] += views
+            cumulative_minutes[str(item["video_id"])] += minutes
             cumulative_likes[str(item["video_id"])] += likes
+            cumulative_video_subscribers[str(item["video_id"])] += subscribers
             cumulative_comments[str(item["video_id"])] += comments
             recent_views[str(item["video_id"])].append((metric_date, views))
 
-            source_views = _split(views, _TRAFFIC_SOURCES)
-            for source, _ in _TRAFFIC_SOURCES:
-                source_average = average_duration * (82 if source == "ADVERTISING" else 100) / 100
+            is_promoted = video_index % 4 == 0
+            source_weights = (
+                _PROMOTED_TRAFFIC_SOURCES if is_promoted else _ORGANIC_TRAFFIC_SOURCES
+            )
+            source_views = _split(views, source_weights, residual_key="YT_SEARCH")
+            if is_promoted:
+                rounded_ad_views = (views * 5 + 50) // 100
+                ad_adjustment = rounded_ad_views - source_views["ADVERTISING"]
+                source_views["ADVERTISING"] = rounded_ad_views
+                source_views["YT_SEARCH"] -= ad_adjustment
+            source_details: dict[str, tuple[float, float]] = {}
+            allocated_minutes = 0.0
+            duration_pct = {
+                "RELATED_VIDEO": 103,
+                "BROWSE_FEATURES": 98,
+                "EXTERNAL": 90,
+                "ADVERTISING": 82,
+            }
+            for source, _ in source_weights:
+                if source == "YT_SEARCH":
+                    continue
+                source_average = average_duration * duration_pct[source] / 100
                 source_minutes = round(source_views[source] * source_average / 60.0, 2)
+                source_details[source] = (source_minutes, round(source_average, 1))
+                allocated_minutes += source_minutes
+            search_minutes = round(minutes - allocated_minutes, 2)
+            search_views = source_views["YT_SEARCH"]
+            search_average = search_minutes * 60.0 / search_views if search_views else 0.0
+            source_details["YT_SEARCH"] = (search_minutes, round(search_average, 1))
+
+            for source, _ in source_weights:
+                source_minutes, source_average = source_details[source]
                 video_traffic_rows.append(
                     (
                         metric_date.isoformat(),
@@ -305,6 +402,8 @@ def build_demo_database(path: Path, *, seed: int = 8142026) -> None:
                 )
                 traffic_totals[source] += source_views[source]
                 traffic_minutes[source] += source_minutes
+                if source == "ADVERTISING":
+                    cumulative_ad_views[str(item["video_id"])] += source_views[source]
 
         subscribers_lost = day_subscribers // 9
         daily_channel_rows.append(
@@ -333,7 +432,7 @@ def build_demo_database(path: Path, *, seed: int = 8142026) -> None:
                 )
             )
 
-        for source, _ in _TRAFFIC_SOURCES:
+        for source in sorted(_REQUIRED_TRAFFIC_SOURCES):
             channel_traffic_rows.append(
                 (
                     metric_date.isoformat(),
@@ -373,60 +472,143 @@ def build_demo_database(path: Path, *, seed: int = 8142026) -> None:
 
     retention_rows: list[tuple] = []
     score_rows: list[tuple] = []
-    cutoff = DEMO_AS_OF - timedelta(days=27)
     for item in catalog:
         video_id = str(item["video_id"])
         video_index = int(video_id[-3:])
-        retention_25 = round((610 + video_index * 7 % 220 + rng.randint(-18, 18)) / 1_000, 3)
-        retention_75 = round(retention_25 * (430 + video_index * 11 % 270) / 1_000, 3)
-        retention_rows.append(
-            (
-                DEMO_CHANNEL_KEY,
-                video_id,
-                cutoff.isoformat(),
-                DEMO_AS_OF.isoformat(),
-                "LAST_28_DAYS",
-                sum(views for day, views in recent_views[video_id] if day >= cutoff),
-                retention_25,
-                retention_75,
-                f"{DEMO_AS_OF.isoformat()}T23:30:00Z",
+        for window_index, (window_days, window_kind) in enumerate(_RETENTION_WINDOWS):
+            window_start = DEMO_AS_OF - timedelta(days=window_days)
+            retention_25 = round(
+                (
+                    610
+                    + video_index * 7 % 220
+                    - window_index * 8
+                    + rng.randint(-12, 12)
+                )
+                / 1_000,
+                3,
             )
+            retention_75 = round(
+                retention_25 * (430 + video_index * 11 % 270) / 1_000,
+                3,
+            )
+            retention_rows.append(
+                (
+                    DEMO_CHANNEL_KEY,
+                    video_id,
+                    window_start.isoformat(),
+                    DEMO_AS_OF.isoformat(),
+                    window_kind,
+                    sum(
+                        views
+                        for day, views in recent_views[video_id]
+                        if window_start <= day <= DEMO_AS_OF
+                    ),
+                    retention_25,
+                    retention_75,
+                    f"{DEMO_AS_OF.isoformat()}T23:30:00Z",
+                )
+            )
+    views_values = {video_id: float(views) for video_id, views in cumulative_views.items()}
+    watch_rates = {
+        str(item["video_id"]): (
+            cumulative_minutes[str(item["video_id"])]
+            * 60.0
+            / max(
+                cumulative_views[str(item["video_id"])] * int(item["duration"]),
+                1,
+            )
+            * 100
         )
-        overall = round(48 + (video_index * 13 % 46) + rng.randint(-3, 3), 1)
-        tier = "PROMOTE" if overall >= 78 else "GROW" if overall >= 62 else "MONITOR"
-        total_views = cumulative_views[video_id]
+        for item in catalog
+    }
+    like_rates = {
+        video_id: cumulative_likes[video_id] / max(cumulative_views[video_id], 1) * 100
+        for video_id in cumulative_views
+    }
+    subscriber_rates = {
+        video_id: cumulative_video_subscribers[video_id]
+        / max(cumulative_views[video_id], 1)
+        * 100
+        for video_id in cumulative_views
+    }
+    promotion_ratios = {
+        video_id: cumulative_ad_views[video_id] / max(cumulative_views[video_id], 1)
+        for video_id in cumulative_views
+    }
+    views_percentiles = _percentile_ranks(views_values)
+    watch_percentiles = _percentile_ranks(watch_rates)
+    like_percentiles = _percentile_ranks(like_rates)
+    subscriber_percentiles = _percentile_ranks(subscriber_rates)
+    organic_percentiles = _percentile_ranks(
+        {video_id: 1.0 - ratio for video_id, ratio in promotion_ratios.items()}
+    )
+
+    for item in catalog:
+        video_id = str(item["video_id"])
+        engagement = (
+            0.40 * watch_percentiles[video_id]
+            + 0.40 * like_percentiles[video_id]
+            + 0.20 * subscriber_percentiles[video_id]
+        )
+        evergreen = (
+            0.50 * watch_percentiles[video_id]
+            + 0.30 * views_percentiles[video_id]
+            + 0.20 * organic_percentiles[video_id]
+        )
+        subscriber_magnet = (
+            0.60 * subscriber_percentiles[video_id]
+            + 0.20 * organic_percentiles[video_id]
+            + 0.20 * watch_percentiles[video_id]
+        )
+        hidden_gem = 0.60 * engagement + 0.40 * (100.0 - views_percentiles[video_id])
+        overall = (
+            0.40 * engagement
+            + 0.30 * evergreen
+            + 0.20 * subscriber_magnet
+            + 0.10 * views_percentiles[video_id]
+        )
+        tier = _classify_ci_tier(
+            round(overall, 1),
+            views_percentiles[video_id],
+            round(subscriber_magnet, 1),
+            round(hidden_gem, 1),
+        )
         score_rows.append(
             (
                 DEMO_AS_OF.isoformat(),
                 DEMO_CHANNEL_KEY,
                 video_id,
                 tier,
-                round(min(99.0, overall + 2.4), 1),
-                round(min(99.0, overall + 5.1), 1),
-                round(max(0.0, overall - 4.3), 1),
-                round(min(99.0, overall + 1.7), 1),
-                overall,
-                total_views,
-                round(42 + video_index % 19, 1),
-                round(3.8 + video_index % 27 / 10, 2),
-                round(0.3 + video_index % 8 / 10, 2),
-                round(0.02 + video_index % 5 / 100, 2),
+                round(engagement, 1),
+                round(evergreen, 1),
+                round(subscriber_magnet, 1),
+                round(hidden_gem, 1),
+                round(overall, 1),
+                cumulative_views[video_id],
+                round(watch_rates[video_id], 1),
+                round(like_rates[video_id], 4),
+                round(subscriber_rates[video_id], 5),
+                round(promotion_ratios[video_id], 4),
             )
         )
 
     recommended = sorted(score_rows, key=lambda row: (-float(row[8]), str(row[2])))[:8]
+    published_by_id = {
+        str(item["video_id"]): item["published"] for item in catalog
+    }
     recommendation_rows: list[tuple] = []
     for rank, score in enumerate(recommended, start=1):
+        published = published_by_id[str(score[2])]
         recommendation_rows.append(
             (
                 DEMO_CHANNEL_KEY,
                 score[2],
-                f"{DEMO_AS_OF.isoformat()}T18:00:00Z",
-                (DEMO_AS_OF + timedelta(days=rank * 2)).isoformat(),
+                f"{(published - timedelta(days=2)).isoformat()}T12:00:00Z",
+                published.isoformat(),
                 rank,
-                round(float(score[8]) / 100, 3),
+                round(10.0 - rank * 0.6, 1),
                 "Reliable AI systems",
-                "Strong durable engagement in this fictional demo cohort.",
+                "A fictional engineering briefing made this release timely.",
             )
         )
 
@@ -440,10 +622,14 @@ def build_demo_database(path: Path, *, seed: int = 8142026) -> None:
                 DEMO_CHANNEL_KEY,
                 video_id,
                 title_by_id[video_id],
-                "community_post",
+                "community_post" if index % 2 else "quote_card",
                 f"A closer look at {title_by_id[video_id]}",
-                "Draft a practical discussion prompt about the engineering "
-                "tradeoffs in this fictional lesson.",
+                (
+                    "Draft a practical discussion prompt about the engineering "
+                    "tradeoffs in this fictional lesson."
+                    if index % 2
+                    else "A concise fictional insight about building reliable AI systems."
+                ),
                 f"{DEMO_AS_OF.isoformat()}T19:{index:02d}:00Z",
                 "draft",
                 None,
@@ -452,12 +638,54 @@ def build_demo_database(path: Path, *, seed: int = 8142026) -> None:
             )
         )
 
+    queue_titles = (
+        "An Approval Gate for High-Impact Agent Actions",
+        "Evaluating Long-Context Retrieval in Production",
+        "A Field Guide to Model Trace Sampling",
+        "Secure Connectors for Internal Knowledge Systems",
+        "Designing a Retrieval Incident Review",
+        "When an Automated Evaluator Drifts",
+    )
+    ranked_candidates = [
+        {
+            "rank": index,
+            "video_id": f"aeg_queue_{index:03d}",
+            "title": title,
+            "theme": (
+                "Reliable agent operations"
+                if index % 2
+                else "Evaluation and retrieval quality"
+            ),
+            "relevance_score": round(10.0 - index * 0.7, 1),
+            "why_now": "A fictional demo news prompt makes this draft timely.",
+            "scheduled_at": (
+                DEMO_AS_OF + timedelta(days=10 + index * 3)
+            ).isoformat(),
+        }
+        for index, title in enumerate(queue_titles, start=1)
+    ]
+    news_headlines = [
+        {
+            "title": "Fictional briefing: teams standardize agent approval gates",
+            "source": "Demo Engineering Wire",
+            "published_at": f"{DEMO_AS_OF.isoformat()}T14:00:00Z",
+        },
+        {
+            "title": "Fictional briefing: retrieval evaluations move into release checks",
+            "source": "Synthetic Systems Journal",
+            "published_at": f"{DEMO_AS_OF.isoformat()}T12:30:00Z",
+        },
+        {
+            "title": "Fictional briefing: observability practices focus on trace quality",
+            "source": "Demo Engineering Wire",
+            "published_at": f"{DEMO_AS_OF.isoformat()}T11:00:00Z",
+        },
+    ]
     queue_payload = json.dumps(
         {
-            "channel": DEMO_CHANNEL_KEY,
-            "generated_for": DEMO_AS_OF.isoformat(),
-            "recommended_video_ids": [row[1] for row in recommendation_rows],
-            "themes": ["evaluation", "observability", "reliable agents"],
+            "news_available": True,
+            "ranked_videos": ranked_candidates,
+            "news_headlines": news_headlines,
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -466,8 +694,8 @@ def build_demo_database(path: Path, *, seed: int = 8142026) -> None:
         (
             f"{DEMO_AS_OF.isoformat()}T18:00:00Z",
             DEMO_CHANNEL_KEY,
-            len(catalog),
-            7,
+            len(ranked_candidates),
+            len(news_headlines),
             queue_payload,
         )
     ]
@@ -585,6 +813,59 @@ def validate_demo_database(path: Path) -> list[str]:
         days = conn.execute("SELECT COUNT(*) FROM daily_channel_metrics").fetchone()[0]
         if days < 184:
             errors.append(f"insufficient history: {days} days")
+        expected_dates = [
+            (DEMO_AS_OF - timedelta(days=offset)).isoformat()
+            for offset in reversed(range(184))
+        ]
+        actual_dates = [
+            row[0]
+            for row in conn.execute(
+                "SELECT metric_date FROM daily_channel_metrics "
+                "WHERE channel=? ORDER BY metric_date",
+                (DEMO_CHANNEL_KEY,),
+            )
+        ]
+        if actual_dates != expected_dates:
+            errors.append("daily channel date coverage mismatch")
+
+        video_count = conn.execute(
+            "SELECT COUNT(*) FROM videos WHERE channel=?", (DEMO_CHANNEL_KEY,)
+        ).fetchone()[0]
+        if video_count < 48:
+            errors.append("insufficient video population")
+        playlist_ids = {
+            row[0]
+            for row in conn.execute(
+                "SELECT playlist_id FROM playlists WHERE channel=?", (DEMO_CHANNEL_KEY,)
+            )
+        }
+        if playlist_ids != set(PLAYLISTS):
+            errors.append("playlist population mismatch")
+
+        expected_countries = {country for country, _ in _GEOGRAPHIES}
+        geo_by_date: defaultdict[str, set[str]] = defaultdict(set)
+        for metric_date, country in conn.execute(
+            "SELECT metric_date, country_code FROM daily_geo_metrics "
+            "WHERE channel=? ORDER BY metric_date, country_code",
+            (DEMO_CHANNEL_KEY,),
+        ):
+            geo_by_date[metric_date].add(country)
+        if any(geo_by_date[metric_date] != expected_countries for metric_date in expected_dates):
+            errors.append("geography coverage mismatch")
+
+        traffic_by_date: defaultdict[str, set[str]] = defaultdict(set)
+        for metric_date, source in conn.execute(
+            "SELECT metric_date, traffic_source_type FROM channel_traffic_sources "
+            "WHERE channel=? ORDER BY metric_date, traffic_source_type",
+            (DEMO_CHANNEL_KEY,),
+        ):
+            traffic_by_date[metric_date].add(source)
+        if any(
+            traffic_by_date[metric_date] != _REQUIRED_TRAFFIC_SOURCES
+            for metric_date in expected_dates
+        ):
+            errors.append("traffic source coverage mismatch")
+
         orphan_count = conn.execute(
             "SELECT COUNT(*) FROM daily_video_metrics d "
             "LEFT JOIN videos v ON v.channel=d.channel AND v.video_id=d.video_id "
@@ -617,6 +898,19 @@ def validate_demo_database(path: Path) -> list[str]:
         if channel_regressions:
             errors.append(f"non-monotonic channel snapshots: {channel_regressions}")
 
+        channel_cumulative_mismatches = conn.execute(
+            "SELECT COUNT(*) FROM channel_snapshots s WHERE "
+            "COALESCE(s.view_count, -1) != COALESCE(("
+            "SELECT SUM(d.views) FROM daily_channel_metrics d "
+            "WHERE d.channel=s.channel AND d.metric_date <= date(s.captured_at)), 0) "
+            "OR COALESCE(s.subscriber_count, -1) != COALESCE(("
+            "SELECT SUM(d.subscribers_gained - d.subscribers_lost) "
+            "FROM daily_channel_metrics d WHERE d.channel=s.channel "
+            "AND d.metric_date <= date(s.captured_at)), 0)"
+        ).fetchone()[0]
+        if channel_cumulative_mismatches:
+            errors.append("channel snapshot cumulative mismatch")
+
         video_previous: dict[tuple[str, str], tuple[int, int, int]] = {}
         video_regressions = 0
         for channel, video_id, views, likes, comments in conn.execute(
@@ -635,6 +929,95 @@ def validate_demo_database(path: Path) -> list[str]:
         if video_regressions:
             errors.append(f"non-monotonic video snapshots: {video_regressions}")
 
+        video_cumulative_mismatches = conn.execute(
+            "SELECT COUNT(*) FROM video_snapshots s WHERE "
+            "COALESCE(s.view_count, -1) != COALESCE(("
+            "SELECT SUM(d.views) FROM daily_video_metrics d "
+            "WHERE d.channel=s.channel AND d.video_id=s.video_id "
+            "AND d.metric_date <= date(s.captured_at)), 0) "
+            "OR COALESCE(s.like_count, -1) != COALESCE(("
+            "SELECT SUM(d.likes) FROM daily_video_metrics d "
+            "WHERE d.channel=s.channel AND d.video_id=s.video_id "
+            "AND d.metric_date <= date(s.captured_at)), 0)"
+        ).fetchone()[0]
+        if video_cumulative_mismatches:
+            errors.append("video snapshot cumulative mismatch")
+
+        daily_reconciliation_mismatches = conn.execute(
+            "SELECT COUNT(*) FROM daily_channel_metrics c LEFT JOIN ("
+            "SELECT channel, metric_date, SUM(views) views, "
+            "SUM(estimated_minutes_watched) minutes, "
+            "SUM(subscribers_gained) subscribers FROM daily_video_metrics "
+            "GROUP BY channel, metric_date) v "
+            "ON v.channel=c.channel AND v.metric_date=c.metric_date "
+            "WHERE c.views != COALESCE(v.views, 0) "
+            "OR ABS(c.estimated_minutes_watched - COALESCE(v.minutes, 0)) > 0.05 "
+            "OR c.subscribers_gained != COALESCE(v.subscribers, 0)"
+        ).fetchone()[0]
+        if daily_reconciliation_mismatches:
+            errors.append("daily channel/video reconciliation mismatch")
+
+        geo_reconciliation_mismatches = conn.execute(
+            "SELECT COUNT(*) FROM daily_channel_metrics c LEFT JOIN ("
+            "SELECT channel, metric_date, SUM(views) views, "
+            "SUM(subscribers_gained) subscribers, SUM(likes) likes "
+            "FROM daily_geo_metrics GROUP BY channel, metric_date) g "
+            "ON g.channel=c.channel AND g.metric_date=c.metric_date LEFT JOIN ("
+            "SELECT channel, metric_date, SUM(likes) likes FROM daily_video_metrics "
+            "GROUP BY channel, metric_date) v "
+            "ON v.channel=c.channel AND v.metric_date=c.metric_date "
+            "WHERE c.views != COALESCE(g.views, -1) "
+            "OR c.subscribers_gained != COALESCE(g.subscribers, -1) "
+            "OR COALESCE(v.likes, 0) != COALESCE(g.likes, -1)"
+        ).fetchone()[0]
+        if geo_reconciliation_mismatches:
+            errors.append("geography reconciliation mismatch")
+
+        video_traffic_mismatches = conn.execute(
+            "SELECT COUNT(*) FROM daily_video_metrics d LEFT JOIN ("
+            "SELECT channel, metric_date, video_id, SUM(views) views, "
+            "SUM(estimated_minutes_watched) minutes "
+            "FROM video_traffic_source_metrics "
+            "GROUP BY channel, metric_date, video_id) t "
+            "ON t.channel=d.channel AND t.metric_date=d.metric_date "
+            "AND t.video_id=d.video_id WHERE d.views != COALESCE(t.views, -1) "
+            "OR ABS(d.estimated_minutes_watched - COALESCE(t.minutes, -1)) > 0.05"
+        ).fetchone()[0]
+        if video_traffic_mismatches:
+            errors.append("video traffic reconciliation mismatch")
+
+        channel_traffic_mismatches = conn.execute(
+            "SELECT COUNT(*) FROM channel_traffic_sources c LEFT JOIN ("
+            "SELECT channel, metric_date, traffic_source_type, SUM(views) views, "
+            "SUM(estimated_minutes_watched) minutes "
+            "FROM video_traffic_source_metrics "
+            "GROUP BY channel, metric_date, traffic_source_type) v "
+            "ON v.channel=c.channel AND v.metric_date=c.metric_date "
+            "AND v.traffic_source_type=c.traffic_source_type "
+            "WHERE c.views != COALESCE(v.views, 0) "
+            "OR ABS(c.estimated_minutes_watched - COALESCE(v.minutes, 0)) > 0.05"
+        ).fetchone()[0]
+        if channel_traffic_mismatches:
+            errors.append("channel traffic reconciliation mismatch")
+
+        promoted_video_count = conn.execute(
+            "SELECT COUNT(DISTINCT video_id) FROM video_traffic_source_metrics "
+            "WHERE channel=? AND traffic_source_type='ADVERTISING'",
+            (DEMO_CHANNEL_KEY,),
+        ).fetchone()[0]
+        if not 0 < promoted_video_count < video_count:
+            errors.append("advertising subset mismatch")
+        promoted_ad_share = conn.execute(
+            "SELECT 100.0 * SUM(CASE WHEN traffic_source_type='ADVERTISING' "
+            "THEN views ELSE 0 END) / NULLIF(SUM(views), 0) "
+            "FROM video_traffic_source_metrics WHERE channel=? AND video_id IN ("
+            "SELECT DISTINCT video_id FROM video_traffic_source_metrics "
+            "WHERE channel=? AND traffic_source_type='ADVERTISING')",
+            (DEMO_CHANNEL_KEY, DEMO_CHANNEL_KEY),
+        ).fetchone()[0]
+        if promoted_ad_share is None or not 4.5 <= promoted_ad_share <= 5.5:
+            errors.append("advertising share mismatch")
+
         invalid_retention = conn.execute(
             "SELECT COUNT(*) FROM retention_buckets "
             "WHERE retention_at_25 < 0 OR retention_at_25 > 1 "
@@ -642,6 +1025,38 @@ def validate_demo_database(path: Path) -> list[str]:
         ).fetchone()[0]
         if invalid_retention:
             errors.append(f"invalid retention bounds: {invalid_retention}")
+
+        retention_by_video: defaultdict[str, dict[str, tuple[str, str]]] = defaultdict(dict)
+        for video_id, start, end, kind in conn.execute(
+            "SELECT video_id, window_start, window_end, window_kind "
+            "FROM retention_buckets WHERE channel=?",
+            (DEMO_CHANNEL_KEY,),
+        ):
+            retention_by_video[video_id][kind] = (start, end)
+        required_windows = {
+            kind: (
+                (DEMO_AS_OF - timedelta(days=window_days)).isoformat(),
+                DEMO_AS_OF.isoformat(),
+            )
+            for window_days, kind in _RETENTION_WINDOWS
+        }
+        video_ids = {
+            row[0]
+            for row in conn.execute(
+                "SELECT video_id FROM videos WHERE channel=?", (DEMO_CHANNEL_KEY,)
+            )
+        }
+        if any(retention_by_video[video_id] != required_windows for video_id in video_ids):
+            errors.append("retention window coverage mismatch")
+
+        retention_view_mismatches = conn.execute(
+            "SELECT COUNT(*) FROM retention_buckets r WHERE r.views != ("
+            "SELECT COALESCE(SUM(d.views), 0) FROM daily_video_metrics d "
+            "WHERE d.channel=r.channel AND d.video_id=r.video_id "
+            "AND d.metric_date BETWEEN r.window_start AND r.window_end)"
+        ).fetchone()[0]
+        if retention_view_mismatches:
+            errors.append("retention view reconciliation mismatch")
 
         playlist_mismatches = conn.execute(
             "SELECT COUNT(*) FROM playlists p "
@@ -661,6 +1076,106 @@ def validate_demo_database(path: Path) -> list[str]:
         ).fetchone()[0]
         if snapshot_count_mismatches:
             errors.append(f"channel snapshot video count mismatch: {snapshot_count_mismatches}")
+
+        queue_rows = conn.execute(
+            "SELECT videos_analyzed, news_stories_count, result_json "
+            "FROM publishing_queue WHERE channel=?",
+            (DEMO_CHANNEL_KEY,),
+        ).fetchall()
+        queue_valid = len(queue_rows) == 1
+        if queue_valid:
+            videos_analyzed, news_count, payload_text = queue_rows[0]
+            try:
+                payload = json.loads(payload_text)
+                ranked = payload["ranked_videos"]
+                headlines = payload["news_headlines"]
+                queue_valid = (
+                    payload["news_available"] is True
+                    and isinstance(ranked, list)
+                    and isinstance(headlines, list)
+                    and videos_analyzed == len(ranked) > 0
+                    and news_count == len(headlines) > 0
+                )
+                ranked_ids = [item["video_id"] for item in ranked]
+                queue_valid = queue_valid and (
+                    len(ranked_ids) == len(set(ranked_ids))
+                    and set(ranked_ids).isdisjoint(video_ids)
+                    and [item["rank"] for item in ranked]
+                    == list(range(1, len(ranked) + 1))
+                    and all(
+                        0 <= float(item["relevance_score"]) <= 10
+                        and item.get("title")
+                        and item.get("theme")
+                        and item.get("why_now")
+                        and item.get("scheduled_at")
+                        for item in ranked
+                    )
+                    and all(
+                        headline.get("title")
+                        and headline.get("source")
+                        and headline.get("published_at")
+                        for headline in headlines
+                    )
+                )
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                queue_valid = False
+        if not queue_valid:
+            errors.append("publishing queue payload mismatch")
+
+        recommendation_mismatches = conn.execute(
+            "SELECT COUNT(*) FROM queue_recommendations q JOIN videos v "
+            "ON v.channel=q.channel AND v.video_id=q.video_id "
+            "WHERE (julianday(v.published_at) - "
+            "julianday(q.recommended_publish_date)) * 24 NOT BETWEEN -72 AND 96 "
+            "OR datetime(q.first_recommended_at) > datetime(q.recommended_publish_date) "
+            "OR q.rank_at_recommendation < 1 "
+            "OR q.relevance_score < 0 OR q.relevance_score > 10"
+        ).fetchone()[0]
+        recommendation_count = conn.execute(
+            "SELECT COUNT(*) FROM queue_recommendations WHERE channel=?",
+            (DEMO_CHANNEL_KEY,),
+        ).fetchone()[0]
+        if recommendation_mismatches or recommendation_count == 0:
+            errors.append("historical recommendation mismatch")
+
+        score_rows = conn.execute(
+            "SELECT video_id, tier, subscriber_magnet_score, hidden_gem_score, "
+            "overall_score, total_views FROM ci_video_scores "
+            "WHERE channel=? AND scored_at=?",
+            (DEMO_CHANNEL_KEY, DEMO_AS_OF.isoformat()),
+        ).fetchall()
+        tiers = {row[1] for row in score_rows}
+        score_views = {row[0]: float(row[5]) for row in score_rows}
+        score_view_percentiles = _percentile_ranks(score_views) if score_views else {}
+        coherent_tiers = all(
+            tier
+            == _classify_ci_tier(
+                float(overall),
+                score_view_percentiles[video_id],
+                float(subscriber_magnet),
+                float(hidden_gem),
+            )
+            for video_id, tier, subscriber_magnet, hidden_gem, overall, _ in score_rows
+        )
+        if (
+            len(score_rows) != video_count
+            or tiers != _CANONICAL_CI_TIERS
+            or not coherent_tiers
+        ):
+            errors.append("CI tier coverage mismatch")
+
+        asset_rows = conn.execute(
+            "SELECT asset_type, status FROM ci_content_assets WHERE channel=?",
+            (DEMO_CHANNEL_KEY,),
+        ).fetchall()
+        asset_types = {row[0] for row in asset_rows}
+        statuses = {row[1] for row in asset_rows}
+        if (
+            not {"community_post", "quote_card"} <= asset_types
+            or not asset_types <= _VALID_ASSET_TYPES
+            or statuses != {"draft"}
+        ):
+            errors.append("CI asset coverage mismatch")
     return errors
 
 
