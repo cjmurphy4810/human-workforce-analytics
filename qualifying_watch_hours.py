@@ -195,7 +195,9 @@ def _cumulative_snapshot_deltas(
     result = result.sort_values(group_columns + ["metric_date"])
     for column in value_columns:
         delta = result.groupby(group_columns)[column].diff()
-        delta = delta.fillna(result[column])
+        # A first snapshot with no pre-window baseline is a lifetime value, not an
+        # increment. Exclude it until a later snapshot supplies an observable delta.
+        delta = delta.fillna(0.0)
         result[column] = delta.where(delta >= 0, result[column])
     return result[result["metric_date"] >= pd.Timestamp(start)]
 
@@ -358,9 +360,6 @@ def _build_real_metrics(
                 promotion_percentage=promo_pct,
                 promotion_views=int(row.get("advertising_views") or 0),
             ))
-        elif 0 < m.length_seconds <= 180:
-            import dataclasses as _dc
-            corrected.append(_dc.replace(m, estimated_qualifying_hours=0.0))
         else:
             corrected.append(m)
 
@@ -610,7 +609,7 @@ def _to_df(metrics: list[VideoPromotionMetrics]) -> pd.DataFrame:
             "Subscribers": m.subscribers,
             "Follow-on Views": m.follow_on_views,
             "Promotion Cost": round(m.promotion_cost, 2),
-            "Cost / Organic Hour": round(m.cost_per_qualified_hour, 2),
+            "Cost / Qualifying Hour": round(m.cost_per_qualified_hour, 2),
             "Cost / Subscriber": round(m.cost_per_subscriber, 2),
             "Cost / Follow-on View": round(m.cost_per_follow_on_view, 2),
             "CTR %": round(m.ctr, 2),
@@ -792,7 +791,7 @@ def _chart_scatter_cost_vs_hours(df: pd.DataFrame) -> None:
         color="Efficiency Score",
         color_continuous_scale="RdYlGn",
         hover_name="Video",
-        hover_data=["Promotion %", "Cost / Organic Hour"],
+        hover_data=["Promotion %", "Cost / Qualifying Hour"],
         labels={
             "Promotion Cost": "Promotion Cost ($)",
             "Est. Qualifying Hours": "Est. Qualifying Hours",
@@ -819,10 +818,10 @@ def _chart_bubble(df: pd.DataFrame) -> None:
         size_max=60,
         labels={
             "Promotion Cost": "Promotion Cost ($)",
-            "Est. Qualifying Hours": "Organic Watch Hours",
+            "Est. Qualifying Hours": "Qualifying Watch Hours",
             "Follow-on Views": "Bubble = Follow-on Views",
         },
-        title="Promotion Cost · Organic Hours · Subscribers (Bubble = Follow-on Views)",
+        title="Promotion Cost · Qualifying Hours · Subscribers (Bubble = Follow-on Views)",
     )
     fig.update_layout(height=440)
     st.plotly_chart(fig, use_container_width=True)
@@ -847,20 +846,20 @@ def _chart_top25_qualifying(df: pd.DataFrame) -> None:
 
 
 def _chart_worst_promotions(df: pd.DataFrame) -> None:
-    promo = df[(df["Promotion Cost"] > 0) & (df["Cost / Organic Hour"] > 0)].copy()
+    promo = df[(df["Promotion Cost"] > 0) & (df["Cost / Qualifying Hour"] > 0)].copy()
     if promo.empty:
         st.info("No promoted videos with cost data in current filter.")
         return
-    worst = promo.nlargest(15, "Cost / Organic Hour")[["Video", "Cost / Organic Hour", "Promotion Cost", "Est. Qualifying Hours"]].copy()
+    worst = promo.nlargest(15, "Cost / Qualifying Hour")[["Video", "Cost / Qualifying Hour", "Promotion Cost", "Est. Qualifying Hours"]].copy()
     worst["short_title"] = worst["Video"].apply(lambda t: t[:50] + "…" if len(t) > 50 else t)
     fig = px.bar(
         worst,
-        x="Cost / Organic Hour",
+        x="Cost / Qualifying Hour",
         y="short_title",
         orientation="h",
-        color="Cost / Organic Hour",
+        color="Cost / Qualifying Hour",
         color_continuous_scale="Reds",
-        labels={"short_title": "", "Cost / Organic Hour": "Cost per Qualifying Hour ($)"},
+        labels={"short_title": "", "Cost / Qualifying Hour": "Cost per Qualifying Hour ($)"},
         title="Worst Promotions: Highest Cost per Qualifying Hour",
     )
     fig.update_yaxes(autorange="reversed")
@@ -1521,7 +1520,7 @@ def render(
         "Total Watch Hours", "Promotion Watch Hours", "Organic Watch Hours",
         "Est. Qualifying Hours",
         "Promotion %", "Subscribers", "Follow-on Views",
-        "Promotion Cost", "Cost / Organic Hour", "Cost / Subscriber", "Cost / Follow-on View",
+        "Promotion Cost", "Cost / Qualifying Hour", "Cost / Subscriber", "Cost / Follow-on View",
         "CTR %", "Avg View Duration", "Watch Time / View",
         "Efficiency Score", "Status",
     ]
@@ -1533,7 +1532,7 @@ def render(
         hide_index=True,
         column_config={
             "Promotion Cost": st.column_config.NumberColumn(format="$%.2f"),
-            "Cost / Organic Hour": st.column_config.NumberColumn(format="$%.2f"),
+            "Cost / Qualifying Hour": st.column_config.NumberColumn(format="$%.2f"),
             "Cost / Subscriber": st.column_config.NumberColumn(format="$%.2f"),
             "Cost / Follow-on View": st.column_config.NumberColumn(format="$%.3f"),
             "Promotion %": st.column_config.NumberColumn(format="%.1f%%"),

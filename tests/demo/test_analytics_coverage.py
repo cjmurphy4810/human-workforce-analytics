@@ -9,7 +9,9 @@ from demo.report_data import query_frame
 from qualifying_watch_hours import (
     _build_real_metrics,
     _build_real_timeseries,
+    _get_advertising_watch_hours,
     _get_db_date_range,
+    _get_shorts_watch_hours,
 )
 
 
@@ -204,6 +206,77 @@ def test_incremental_timeseries_matches_each_window_and_excludes_shorts(tmp_path
     assert result["promotion_hours"].tolist() == pytest.approx([5.0, 0.0])
     assert result["organic_hours"].tolist() == pytest.approx([5.0, 10.0])
     assert result["qualifying_hours"].tolist() == pytest.approx([100 / 60, 10.0])
+
+
+def _build_unbaselined_production_window(path):
+    with connect_demo_db(path) as conn:
+        conn.executemany(
+            "INSERT INTO videos(channel, video_id, title, duration_seconds) "
+            "VALUES (?, ?, ?, ?)",
+            [
+                (DEMO_CHANNEL_KEY, "long", "Long", 600),
+                (DEMO_CHANNEL_KEY, "short", "Short", 120),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO daily_channel_metrics VALUES (?, ?, 600, 600, 0, 0)",
+            [
+                ("2026-08-07", DEMO_CHANNEL_KEY),
+                ("2026-08-14", DEMO_CHANNEL_KEY),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO daily_video_metrics "
+            "(metric_date, channel, video_id, views, estimated_minutes_watched, "
+            "average_view_duration, likes, subscribers_gained) "
+            "VALUES (?, ?, 'short', ?, ?, 60, 0, 0)",
+            [
+                ("2026-08-07", DEMO_CHANNEL_KEY, 200, 200.0),
+                ("2026-08-14", DEMO_CHANNEL_KEY, 260, 260.0),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO video_traffic_source_metrics "
+            "(metric_date, channel, video_id, traffic_source_type, views, "
+            "estimated_minutes_watched, average_view_duration) VALUES "
+            "(?, ?, ?, 'ADVERTISING', ?, ?, 60)",
+            [
+                ("2026-08-07", DEMO_CHANNEL_KEY, "long", 300, 300.0),
+                ("2026-08-14", DEMO_CHANNEL_KEY, "long", 360, 360.0),
+                ("2026-08-07", DEMO_CHANNEL_KEY, "short", 20, 20.0),
+                ("2026-08-14", DEMO_CHANNEL_KEY, "short", 30, 30.0),
+            ],
+        )
+        conn.commit()
+
+
+def test_production_ypp_excludes_unbaselined_lifetime_snapshot(tmp_path):
+    path = tmp_path / "unbaselined_ypp.db"
+    _build_unbaselined_production_window(path)
+
+    advertising, has_data = _get_advertising_watch_hours(
+        path, DEMO_CHANNEL_KEY, as_of=date(2026, 8, 14)
+    )
+    shorts = _get_shorts_watch_hours(
+        path, DEMO_CHANNEL_KEY, as_of=date(2026, 8, 14)
+    )
+
+    assert has_data is True
+    assert advertising == pytest.approx(70 / 60)
+    assert shorts == pytest.approx(50 / 60)
+
+
+def test_production_weekly_series_excludes_unbaselined_lifetime_snapshot(tmp_path):
+    path = tmp_path / "unbaselined_weekly.db"
+    _build_unbaselined_production_window(path)
+
+    result = _build_real_timeseries(
+        path, DEMO_CHANNEL_KEY, as_of=date(2026, 8, 14)
+    )
+
+    assert result["promotion_hours"].tolist() == pytest.approx([0.0, 70 / 60])
+    assert result["organic_hours"].tolist() == pytest.approx([10.0, 10 - 70 / 60])
+    assert result["qualifying_hours"].tolist() == pytest.approx([10.0, 8.0])
 
 
 def test_db_date_range_matches_trailing_year_window(tmp_path):

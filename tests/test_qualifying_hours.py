@@ -1,5 +1,4 @@
-import dataclasses
-
+import pandas as pd
 import pytest
 
 from analytics.qualifying_hours import (
@@ -7,6 +6,7 @@ from analytics.qualifying_hours import (
     recompute_with_sim_duration,
 )
 from models.promotion import make_metrics
+import qualifying_watch_hours as report_page
 
 
 def _metric(video_id: str, *, length: int, total_hours: float, promo_hours: float):
@@ -28,10 +28,7 @@ def _metric(video_id: str, *, length: int, total_hours: float, promo_hours: floa
 
 def test_report_distinguishes_organic_from_monetization_qualifying_hours():
     long_video = _metric("long", length=600, total_hours=10, promo_hours=2)
-    short_video = dataclasses.replace(
-        _metric("short", length=120, total_hours=4, promo_hours=1),
-        estimated_qualifying_hours=0,
-    )
+    short_video = _metric("short", length=120, total_hours=4, promo_hours=1)
 
     report = compute_qualifying_hours([long_video, short_video])
 
@@ -41,12 +38,52 @@ def test_report_distinguishes_organic_from_monetization_qualifying_hours():
 
 
 def test_simulation_keeps_shorts_excluded_from_qualifying_hours():
-    short_video = dataclasses.replace(
-        _metric("short", length=120, total_hours=4, promo_hours=1),
-        estimated_qualifying_hours=0,
-    )
+    short_video = _metric("short", length=120, total_hours=4, promo_hours=1)
 
     [result] = recompute_with_sim_duration([short_video], 90)
 
     assert result.organic_watch_hours == pytest.approx(3.5)
     assert result.estimated_qualifying_hours == 0
+
+
+def test_metric_factory_excludes_shorts_from_qualifying_hours():
+    short_video = _metric("short", length=120, total_hours=4, promo_hours=1)
+
+    assert short_video.organic_watch_hours == pytest.approx(3)
+    assert short_video.estimated_qualifying_hours == 0
+    assert short_video.cost_per_qualified_hour == 0
+
+
+def test_report_table_distinguishes_organic_and_qualifying_cost_labels():
+    frame = report_page._to_df(
+        [_metric("long", length=600, total_hours=10, promo_hours=2)]
+    )
+
+    assert "Organic Watch Hours" in frame.columns
+    assert "Est. Qualifying Hours" in frame.columns
+    assert "Cost / Qualifying Hour" in frame.columns
+    assert "Cost / Organic Hour" not in frame.columns
+
+
+def test_bubble_chart_labels_qualifying_hours_as_qualifying(monkeypatch):
+    captured = []
+    monkeypatch.setattr(
+        report_page.st,
+        "plotly_chart",
+        lambda figure, **kwargs: captured.append(figure),
+    )
+    frame = pd.DataFrame(
+        [{
+            "Video": "Fixture",
+            "Promotion Cost": 10.0,
+            "Est. Qualifying Hours": 5.0,
+            "Follow-on Views": 2,
+            "Subscribers": 1,
+        }]
+    )
+
+    report_page._chart_bubble(frame)
+
+    assert captured[0].layout.yaxis.title.text == "Qualifying Watch Hours"
+    assert "Qualifying" in captured[0].layout.title.text
+    assert "Organic" not in captured[0].layout.title.text

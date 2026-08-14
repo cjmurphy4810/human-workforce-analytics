@@ -2,7 +2,8 @@
 Qualifying watch hours calculations.
 
 Core formula:
-  Estimated Qualifying Hours = Total Watch Hours - Promotion Watch Hours
+  Organic Watch Hours = Total Watch Hours - Promotion Watch Hours
+  Estimated Qualifying Hours = Organic Watch Hours, excluding Shorts
   Promotion Watch Hours = Promotion Views × Avg Promotion View Duration (seconds) / 3600
 
 When avg promotion view duration is unavailable, estimate using the overall average

@@ -78,7 +78,7 @@ def make_metrics(
     organic_views = max(total_views - promotion_views, 0)
     promo_watch_hours = promotion_views * avg_promotion_view_duration_seconds / 3600
     organic_watch_hours = max(total_watch_hours - promo_watch_hours, 0)
-    qualifying_hours = organic_watch_hours
+    qualifying_hours = 0.0 if 0 < length_seconds <= 180 else organic_watch_hours
     promo_pct = (promotion_views / max(total_views, 1)) * 100
     cost_per_qual = promotion_cost / qualifying_hours if qualifying_hours > 0 and promotion_cost > 0 else 0.0
     cost_per_sub = promotion_cost / subscribers if subscribers > 0 and promotion_cost > 0 else 0.0
