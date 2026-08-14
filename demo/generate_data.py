@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 import sqlite3
 from collections import defaultdict
@@ -898,6 +899,17 @@ def validate_demo_database(path: Path) -> list[str]:
         if channel_regressions:
             errors.append(f"non-monotonic channel snapshots: {channel_regressions}")
 
+        channel_snapshot_dates = [
+            row[0]
+            for row in conn.execute(
+                "SELECT date(captured_at) FROM channel_snapshots "
+                "WHERE channel=? ORDER BY captured_at, id",
+                (DEMO_CHANNEL_KEY,),
+            )
+        ]
+        if channel_snapshot_dates != expected_dates:
+            errors.append("channel snapshot coverage mismatch")
+
         channel_cumulative_mismatches = conn.execute(
             "SELECT COUNT(*) FROM channel_snapshots s WHERE "
             "COALESCE(s.view_count, -1) != COALESCE(("
@@ -928,6 +940,30 @@ def validate_demo_database(path: Path) -> list[str]:
             video_previous[key] = current
         if video_regressions:
             errors.append(f"non-monotonic video snapshots: {video_regressions}")
+
+        scheduled_snapshot_dates = [
+            metric_date
+            for index, metric_date in enumerate(expected_dates)
+            if index % 7 == 0 or metric_date == DEMO_AS_OF.isoformat()
+        ]
+        published_videos = conn.execute(
+            "SELECT video_id, date(published_at) FROM videos "
+            "WHERE channel=? ORDER BY video_id",
+            (DEMO_CHANNEL_KEY,),
+        ).fetchall()
+        expected_video_snapshots = sorted(
+            (snapshot_date, video_id)
+            for video_id, published_date in published_videos
+            for snapshot_date in scheduled_snapshot_dates
+            if published_date <= snapshot_date
+        )
+        actual_video_snapshots = conn.execute(
+            "SELECT date(captured_at), video_id FROM video_snapshots "
+            "WHERE channel=? ORDER BY date(captured_at), video_id, id",
+            (DEMO_CHANNEL_KEY,),
+        ).fetchall()
+        if actual_video_snapshots != expected_video_snapshots:
+            errors.append("video snapshot coverage mismatch")
 
         video_cumulative_mismatches = conn.execute(
             "SELECT COUNT(*) FROM video_snapshots s WHERE "
@@ -1087,36 +1123,46 @@ def validate_demo_database(path: Path) -> list[str]:
             videos_analyzed, news_count, payload_text = queue_rows[0]
             try:
                 payload = json.loads(payload_text)
-                ranked = payload["ranked_videos"]
-                headlines = payload["news_headlines"]
+                queue_valid = isinstance(payload, dict)
+                ranked = payload.get("ranked_videos") if queue_valid else None
+                headlines = payload.get("news_headlines") if queue_valid else None
+                ranked_are_objects = isinstance(ranked, list) and all(
+                    isinstance(item, dict) for item in ranked
+                )
+                headlines_are_objects = isinstance(headlines, list) and all(
+                    isinstance(headline, dict) for headline in headlines
+                )
                 queue_valid = (
-                    payload["news_available"] is True
-                    and isinstance(ranked, list)
-                    and isinstance(headlines, list)
+                    queue_valid
+                    and payload.get("news_available") is True
+                    and ranked_are_objects
+                    and headlines_are_objects
                     and videos_analyzed == len(ranked) > 0
                     and news_count == len(headlines) > 0
                 )
-                ranked_ids = [item["video_id"] for item in ranked]
-                queue_valid = queue_valid and (
-                    len(ranked_ids) == len(set(ranked_ids))
-                    and set(ranked_ids).isdisjoint(video_ids)
-                    and [item["rank"] for item in ranked]
-                    == list(range(1, len(ranked) + 1))
-                    and all(
-                        0 <= float(item["relevance_score"]) <= 10
-                        and item.get("title")
-                        and item.get("theme")
-                        and item.get("why_now")
-                        and item.get("scheduled_at")
-                        for item in ranked
+                if queue_valid:
+                    ranked_ids = [item["video_id"] for item in ranked]
+                    queue_valid = (
+                        len(ranked_ids) == len(set(ranked_ids))
+                        and set(ranked_ids).isdisjoint(video_ids)
+                        and [item["rank"] for item in ranked]
+                        == list(range(1, len(ranked) + 1))
+                        and all(
+                            math.isfinite(float(item["relevance_score"]))
+                            and 0 <= float(item["relevance_score"]) <= 10
+                            and item.get("title")
+                            and item.get("theme")
+                            and item.get("why_now")
+                            and item.get("scheduled_at")
+                            for item in ranked
+                        )
+                        and all(
+                            headline.get("title")
+                            and headline.get("source")
+                            and headline.get("published_at")
+                            for headline in headlines
+                        )
                     )
-                    and all(
-                        headline.get("title")
-                        and headline.get("source")
-                        and headline.get("published_at")
-                        for headline in headlines
-                    )
-                )
             except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                 queue_valid = False
         if not queue_valid:
@@ -1139,24 +1185,37 @@ def validate_demo_database(path: Path) -> list[str]:
             errors.append("historical recommendation mismatch")
 
         score_rows = conn.execute(
-            "SELECT video_id, tier, subscriber_magnet_score, hidden_gem_score, "
-            "overall_score, total_views FROM ci_video_scores "
+            "SELECT video_id, tier, engagement_score, evergreen_score, "
+            "subscriber_magnet_score, hidden_gem_score, overall_score, total_views, "
+            "watch_rate_pct, like_rate_pct, sub_rate_pct, promotion_ratio "
+            "FROM ci_video_scores "
             "WHERE channel=? AND scored_at=?",
             (DEMO_CHANNEL_KEY, DEMO_AS_OF.isoformat()),
         ).fetchall()
         tiers = {row[1] for row in score_rows}
-        score_views = {row[0]: float(row[5]) for row in score_rows}
-        score_view_percentiles = _percentile_ranks(score_views) if score_views else {}
-        coherent_tiers = all(
-            tier
-            == _classify_ci_tier(
-                float(overall),
-                score_view_percentiles[video_id],
-                float(subscriber_magnet),
-                float(hidden_gem),
-            )
-            for video_id, tier, subscriber_magnet, hidden_gem, overall, _ in score_rows
+        numeric_values_valid = all(
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            for row in score_rows
+            for value in row[2:]
         )
+        if not numeric_values_valid:
+            errors.append("CI numeric values mismatch")
+        coherent_tiers = False
+        if numeric_values_valid:
+            score_views = {row[0]: float(row[7]) for row in score_rows}
+            score_view_percentiles = _percentile_ranks(score_views) if score_views else {}
+            coherent_tiers = all(
+                row[1]
+                == _classify_ci_tier(
+                    float(row[6]),
+                    score_view_percentiles[row[0]],
+                    float(row[4]),
+                    float(row[5]),
+                )
+                for row in score_rows
+            )
         if (
             len(score_rows) != video_count
             or tiers != _CANONICAL_CI_TIERS

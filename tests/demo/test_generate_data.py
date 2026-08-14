@@ -238,6 +238,14 @@ def test_ci_rows_cover_canonical_tiers_and_multiple_draft_asset_types(tmp_path):
             "channel snapshot cumulative mismatch",
         ),
         (
+            "DELETE FROM channel_snapshots",
+            "channel snapshot coverage mismatch",
+        ),
+        (
+            "DELETE FROM video_snapshots",
+            "video snapshot coverage mismatch",
+        ),
+        (
             "UPDATE video_traffic_source_metrics SET views=views+1 "
             "WHERE rowid=(SELECT rowid FROM video_traffic_source_metrics LIMIT 1)",
             "video traffic reconciliation mismatch",
@@ -263,6 +271,21 @@ def test_ci_rows_cover_canonical_tiers_and_multiple_draft_asset_types(tmp_path):
             "CI tier coverage mismatch",
         ),
         (
+            "UPDATE ci_video_scores SET engagement_score=NULL "
+            "WHERE rowid=(SELECT rowid FROM ci_video_scores LIMIT 1)",
+            "CI numeric values mismatch",
+        ),
+        (
+            "UPDATE ci_video_scores SET total_views=NULL "
+            "WHERE rowid=(SELECT rowid FROM ci_video_scores LIMIT 1)",
+            "CI numeric values mismatch",
+        ),
+        (
+            "UPDATE ci_video_scores SET overall_score=1e999 "
+            "WHERE rowid=(SELECT rowid FROM ci_video_scores LIMIT 1)",
+            "CI numeric values mismatch",
+        ),
+        (
             "UPDATE ci_content_assets SET asset_type='community_post'",
             "CI asset coverage mismatch",
         ),
@@ -276,3 +299,24 @@ def test_validator_reports_corrupted_contracts(tmp_path, sql, expected_error):
         conn.commit()
 
     assert expected_error in validate_demo_database(path)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["news_headlines", "ranked_videos"],
+)
+def test_validator_returns_queue_error_for_non_object_elements(tmp_path, field):
+    path = tmp_path / "demo.db"
+    build_demo_database(path)
+    with sqlite3.connect(path) as conn:
+        payload = json.loads(
+            conn.execute("SELECT result_json FROM publishing_queue").fetchone()[0]
+        )
+        payload[field] = ["bad"] * len(payload[field])
+        conn.execute(
+            "UPDATE publishing_queue SET result_json=?",
+            (json.dumps(payload),),
+        )
+        conn.commit()
+
+    assert "publishing queue payload mismatch" in validate_demo_database(path)
