@@ -18,3 +18,12 @@ def test_demo_exposes_all_reports():
         "Content Intelligence", "Video Render Comparisons",
     ):
         assert label in source
+
+
+def test_core_demo_pages_use_demo_data_boundary():
+    for name in ("overview.py", "daily_analytics.py", "qualifying_watch_hours.py"):
+        source = (DEMO_ROOT / "pages" / name).read_text()
+        assert "demo.config" in source
+        assert "data.db" not in source
+        assert "from db import DB_PATH" not in source
+        assert "authenticated" not in source
