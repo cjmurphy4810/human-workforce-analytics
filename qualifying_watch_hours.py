@@ -4,8 +4,9 @@ Qualifying Watch Hours dashboard page.
 Answers: "For every dollar spent promoting a video, how many qualifying watch hours
 did we actually create?"
 
-Qualifying hours = Total Watch Hours - Promotion Watch Hours.
-Promotion Watch Hours = Promotion Views × Avg Promotion View Duration.
+Qualifying Hours = Total Watch Hours - Advertising-Generated Watch Hours
+                   - Organic Shorts Watch Hours.
+Advertising-Generated Watch Hours = Advertising Views × Avg Advertising View Duration.
 """
 from __future__ import annotations
 
@@ -218,7 +219,8 @@ def _build_real_metrics(
     is estimated as promotion_views × average_view_duration / 3600 (data_source='ESTIMATED').
     Follow-on views are tracked separately and never counted as watch hours.
 
-    If no promotion data exists at all, data_source='NONE' and qualifying hours = total hours.
+    If no promotion data exists at all, data_source='NONE' and qualifying hours exclude
+    Shorts but cannot yet exclude advertising-generated watch time.
     """
     effective_as_of = as_of or date.today()
     window_start = effective_as_of - timedelta(days=364)
@@ -1111,8 +1113,8 @@ def render(
     empty_copy = empty_message or "No qualifying watch-hour data is available."
     st.header("Qualifying Watch Hours")
     st.caption(
-        "Estimates YouTube Partner Program qualifying watch hours by removing "
-        "promotion-generated watch time from total watch time."
+        "Estimates YouTube Partner Program qualifying watch hours by excluding "
+        "advertising-generated watch time and watch time from Shorts."
     )
 
     # --- Sidebar: data source & filters ---

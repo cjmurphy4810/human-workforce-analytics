@@ -46,7 +46,7 @@ class VideoPromotionMetrics:
     promotion_efficiency_score: float = 0.0
     # "API_ACTUAL"  — promotion_watch_hours from insightTrafficSourceType=ADVERTISING
     # "ESTIMATED"   — promotion_watch_hours from promotion_views × avg_view_duration / 3600
-    # "NONE"        — no promotion data available; qualifying hours equal total hours
+    # "NONE"        — no promotion data available; qualifying excludes Shorts only
     data_source: str = "NONE"
 
 

@@ -282,12 +282,13 @@ def _build_real_features(db: Path, cpv: float, channel: str) -> list[VideoFeatur
             if m.data_source == "API_ACTUAL" and float(row.get("adv_watch_hours", 0)) > 0:
                 adv_wh = float(row["adv_watch_hours"])
                 org_wh = max(m.total_watch_hours - adv_wh, 0.0)
+                qualifying_wh = 0.0 if 0 < m.length_seconds <= 180 else org_wh
                 promo_pct = (m.promotion_views / max(m.total_views, 1)) * 100
                 corrected.append(_dc.replace(
                     m,
                     promotion_watch_hours=adv_wh,
                     organic_watch_hours=org_wh,
-                    estimated_qualifying_hours=org_wh,
+                    estimated_qualifying_hours=qualifying_wh,
                     promotion_percentage=promo_pct,
                 ))
             else:

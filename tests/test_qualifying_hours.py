@@ -1,3 +1,5 @@
+from datetime import date
+
 import pandas as pd
 import pytest
 
@@ -87,3 +89,20 @@ def test_bubble_chart_labels_qualifying_hours_as_qualifying(monkeypatch):
     assert captured[0].layout.yaxis.title.text == "Qualifying Watch Hours"
     assert "Qualifying" in captured[0].layout.title.text
     assert "Organic" not in captured[0].layout.title.text
+
+
+def test_public_caption_names_both_qualifying_exclusions(monkeypatch, tmp_path):
+    captions = []
+    monkeypatch.setattr(report_page.st, "caption", captions.append)
+
+    report_page.render(
+        tmp_path / "missing.db",
+        "channel-a",
+        as_of=date(2026, 8, 14),
+        fixed_data_source=True,
+    )
+
+    assert captions[0] == (
+        "Estimates YouTube Partner Program qualifying watch hours by excluding "
+        "advertising-generated watch time and watch time from Shorts."
+    )
