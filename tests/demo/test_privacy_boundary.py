@@ -1,28 +1,84 @@
+import json
 from pathlib import Path
 import sqlite3
 
 import pytest
 
-from demo.config import DEMO_DB_PATH
 from tests.demo.privacy_rules import scan_demo_artifacts
 
 
-PRODUCTION_DB_PATH = Path("data.db")
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+DEMO_ROOT = REPOSITORY_ROOT / "demo"
+DEMO_DB_PATH = DEMO_ROOT / "data" / "demo.db"
+PRODUCTION_DB_PATH = REPOSITORY_ROOT / "data.db"
+
+PRODUCTION_IDENTIFIER_COLUMNS = {
+    "channel_snapshots": ("channel", "channel_id"),
+    "channel_traffic_sources": ("channel",),
+    "ci_content_assets": ("asset_id", "channel", "video_id"),
+    "ci_video_scores": ("channel", "video_id"),
+    "daily_channel_metrics": ("channel",),
+    "daily_geo_metrics": ("channel",),
+    "daily_video_metrics": ("channel", "video_id"),
+    "playlist_metrics": ("playlist_id",),
+    "playlist_videos": ("channel", "playlist_id", "video_id"),
+    "playlists": ("channel", "playlist_id"),
+    "publishing_queue": ("channel", "result_json"),
+    "queue_recommendations": ("channel", "video_id"),
+    "retention_buckets": ("channel", "video_id"),
+    "video_ctr_metrics": ("video_id",),
+    "video_snapshots": ("channel", "video_id"),
+    "video_traffic_source_metrics": ("channel", "video_id"),
+    "videos": ("channel", "video_id"),
+}
+
+
+def _identifiers_from_queue_payload(raw: str) -> set[str]:
+    identifiers: set[str] = set()
+
+    def visit(value, key=""):
+        if isinstance(value, dict):
+            for child_key, child_value in value.items():
+                visit(child_value, child_key)
+        elif isinstance(value, list):
+            for child_value in value:
+                visit(child_value, key)
+        elif key.endswith("_id") and isinstance(value, str) and value:
+            identifiers.add(value)
+
+    visit(json.loads(raw))
+    return identifiers
 
 
 def _load_production_youtube_ids(path: Path) -> set[str]:
     with sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True) as conn:
-        identifiers = {
-            row[0]
-            for query in (
-                "SELECT video_id FROM videos",
-                "SELECT playlist_id FROM playlists",
-                "SELECT channel_id FROM channel_snapshots",
-            )
-            for row in conn.execute(query)
-            if row[0]
-        }
+        identifiers: set[str] = set()
+        for table, columns in PRODUCTION_IDENTIFIER_COLUMNS.items():
+            actual_columns = {
+                row[1]
+                for row in conn.execute(f'PRAGMA table_info("{table}")').fetchall()
+            }
+            missing_columns = set(columns) - actual_columns
+            if missing_columns:
+                raise AssertionError(f"production identifier schema mismatch: {table}")
+            for column in columns:
+                values = conn.execute(
+                    f'SELECT DISTINCT "{column}" FROM "{table}" '
+                    f'WHERE "{column}" IS NOT NULL'
+                ).fetchall()
+                for (value,) in values:
+                    if column == "result_json":
+                        identifiers.update(_identifiers_from_queue_payload(value))
+                    elif value:
+                        identifiers.add(str(value))
     return identifiers
+
+
+def _create_production_identifier_database(path: Path) -> None:
+    with sqlite3.connect(path) as conn:
+        for table, columns in PRODUCTION_IDENTIFIER_COLUMNS.items():
+            definitions = ", ".join(f'"{column}" TEXT' for column in columns)
+            conn.execute(f'CREATE TABLE "{table}" ({definitions})')
 
 
 def _create_scannable_database(path: Path) -> None:
@@ -59,12 +115,58 @@ def test_demo_artifacts_pass_privacy_scan():
     assert production_ids
     assert (
         scan_demo_artifacts(
-            Path("demo"),
+            DEMO_ROOT,
             DEMO_DB_PATH,
             known_youtube_ids=production_ids,
         )
         == []
     )
+
+
+def test_demo_privacy_scan_is_independent_of_current_working_directory(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    production_ids = _load_production_youtube_ids(PRODUCTION_DB_PATH)
+
+    assert (
+        scan_demo_artifacts(
+            DEMO_ROOT,
+            DEMO_DB_PATH,
+            known_youtube_ids=production_ids,
+        )
+        == []
+    )
+
+
+def test_secondary_identifier_table_values_are_detected_and_redacted(tmp_path):
+    production_db = tmp_path / "production.db"
+    _create_production_identifier_database(production_db)
+    secondary_id = "SecOndary_1"
+    with sqlite3.connect(production_db) as conn:
+        conn.execute(
+            "INSERT INTO video_traffic_source_metrics(video_id) VALUES (?)",
+            (secondary_id,),
+        )
+    production_ids = _load_production_youtube_ids(production_db)
+    root = tmp_path / "demo"
+    root.mkdir()
+    (root / "artifact.unknown").write_bytes(
+        f"prefix{secondary_id}suffix".encode("ascii")
+    )
+    db_path = tmp_path / "demo.db"
+    _create_scannable_database(db_path)
+
+    errors = scan_demo_artifacts(
+        root,
+        db_path,
+        known_youtube_ids=production_ids,
+    )
+
+    assert secondary_id in production_ids
+    assert any("production YouTube ID" in error for error in errors)
+    assert all(secondary_id not in error for error in errors)
 
 
 def test_scanner_detects_forbidden_content(tmp_path):
@@ -119,6 +221,42 @@ def test_scanner_detects_forbidden_credential_paths(tmp_path):
     assert any("forbidden path token .streamlit/secrets" in error for error in errors)
 
 
+@pytest.mark.parametrize(
+    ("filename", "contents"),
+    [
+        ("artifact.unknown", b"youtube_client"),
+        ("extensionless", b"youtube_client"),
+        ("artifact.bin", b"\x00\xffyoutube_client\x00"),
+    ],
+)
+def test_scanner_checks_every_regular_artifact(tmp_path, filename, contents):
+    root = tmp_path / "demo"
+    root.mkdir()
+    (root / filename).write_bytes(contents)
+    db_path = tmp_path / "demo.db"
+    _create_scannable_database(db_path)
+
+    errors = scan_demo_artifacts(root, db_path)
+
+    assert any("youtube_client" in error for error in errors)
+
+
+def test_scanner_checks_relative_paths_for_brands(tmp_path):
+    root = tmp_path / "demo"
+    branded_directory = root / "Club Genius"
+    branded_directory.mkdir(parents=True)
+    (branded_directory / "artifact").write_bytes(b"")
+    db_path = tmp_path / "demo.db"
+    _create_scannable_database(db_path)
+
+    errors = scan_demo_artifacts(root, db_path)
+
+    assert any(
+        "forbidden" in error and "club genius" in error.lower()
+        for error in errors
+    )
+
+
 def test_scanner_detects_remote_artwork_but_allows_svg_namespace(tmp_path):
     root = tmp_path / "demo"
     root.mkdir()
@@ -135,6 +273,30 @@ def test_scanner_detects_remote_artwork_but_allows_svg_namespace(tmp_path):
 
     remote_errors = [error for error in errors if "remote URL" in error]
     assert len(remote_errors) == 1
+
+
+@pytest.mark.parametrize(
+    "remote_reference",
+    [
+        '<img src="//cdn.example.invalid/image.png">',
+        '<image href="//cdn.example.invalid/image.svg" />',
+        ".hero { background-image: url(//cdn.example.invalid/image.png); }",
+        "asset = 's3://fictional-bucket/image.png'",
+    ],
+)
+def test_scanner_detects_protocol_relative_and_remote_scheme_references(
+    tmp_path,
+    remote_reference,
+):
+    root = tmp_path / "demo"
+    root.mkdir()
+    (root / "artifact").write_text(remote_reference, encoding="utf-8")
+    db_path = tmp_path / "demo.db"
+    _create_scannable_database(db_path)
+
+    errors = scan_demo_artifacts(root, db_path)
+
+    assert any("remote URL" in error for error in errors)
 
 
 def test_scanner_detects_database_brands_and_remote_urls(tmp_path):
@@ -214,6 +376,26 @@ def test_scanner_detects_known_youtube_ids_without_echoing_them(tmp_path):
     )
 
     assert len([error for error in errors if "production YouTube ID" in error]) == 2
+    assert all(known_id not in error for error in errors)
+
+
+def test_scanner_detects_adjacent_ids_and_redacts_id_bearing_filenames(tmp_path):
+    root = tmp_path / "demo"
+    root.mkdir()
+    known_id = "Adjacent__1"
+    (root / f"before{known_id}after.bin").write_bytes(
+        f"prefix{known_id}suffix".encode("ascii")
+    )
+    db_path = tmp_path / "demo.db"
+    _create_scannable_database(db_path)
+
+    errors = scan_demo_artifacts(
+        root,
+        db_path,
+        known_youtube_ids={known_id},
+    )
+
+    assert any("production YouTube ID" in error for error in errors)
     assert all(known_id not in error for error in errors)
 
 

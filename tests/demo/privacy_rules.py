@@ -79,26 +79,23 @@ TEXT_COLUMNS = {
     ),
 }
 
-SCANNED_SOURCE_SUFFIXES = {
-    ".css",
-    ".html",
-    ".js",
-    ".json",
-    ".md",
-    ".py",
-    ".svg",
-    ".toml",
-    ".txt",
-    ".yaml",
-    ".yml",
-}
-
-_REMOTE_URL_PATTERN = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
+_REMOTE_SCHEME_PATTERN = re.compile(
+    r"(?:https?|ftps?|s3|gs|wss?)://[^\s\"'<>)}\]]+",
+    re.IGNORECASE,
+)
+_PROTOCOL_RELATIVE_PATTERN = re.compile(
+    r"(?<!:)//(?:"
+    r"localhost|"
+    r"(?:\d{1,3}\.){3}\d{1,3}|"
+    r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}"
+    r")(?::\d{1,5})?(?:/[^\s\"'<>)}\]]*)?",
+    re.IGNORECASE,
+)
 _ALLOWED_SOURCE_URLS = {
     "http://www.w3.org/1999/xlink",
     "http://www.w3.org/2000/svg",
 }
-_YOUTUBE_ID_CHARACTER = r"A-Za-z0-9_-"
+_ASCII_TEXT_PATTERN = re.compile(rb"[\x09\x0a\x0d\x20-\x7e]+")
 
 
 def _production_id_pattern(known_youtube_ids: Iterable[str]) -> re.Pattern[str] | None:
@@ -109,17 +106,30 @@ def _production_id_pattern(known_youtube_ids: Iterable[str]) -> re.Pattern[str] 
     if not identifiers:
         return None
     alternatives = "|".join(re.escape(identifier) for identifier in identifiers)
-    return re.compile(
-        rf"(?<![{_YOUTUBE_ID_CHARACTER}])(?:{alternatives})(?![{_YOUTUBE_ID_CHARACTER}])"
+    return re.compile(alternatives)
+
+
+def _has_remote_reference(text: str, *, allow_standard_urls: bool) -> bool:
+    for match in _REMOTE_SCHEME_PATTERN.finditer(text):
+        if not allow_standard_urls or match.group(0) not in _ALLOWED_SOURCE_URLS:
+            return True
+    return _PROTOCOL_RELATIVE_PATTERN.search(text) is not None
+
+
+def _redact_production_ids(
+    value: str,
+    production_id_pattern: re.Pattern[str] | None,
+) -> str:
+    if production_id_pattern is None:
+        return value
+    return production_id_pattern.sub("<redacted-production-id>", value)
+
+
+def _ascii_text(raw: bytes) -> str:
+    return "\n".join(
+        match.group(0).decode("ascii")
+        for match in _ASCII_TEXT_PATTERN.finditer(raw)
     )
-
-
-def _remote_urls(text: str) -> list[str]:
-    return [
-        match.group(0)
-        for match in _REMOTE_URL_PATTERN.finditer(text)
-        if match.group(0).rstrip(".,;") not in _ALLOWED_SOURCE_URLS
-    ]
 
 
 def _scan_text(
@@ -140,8 +150,7 @@ def _scan_text(
             category = "forbidden brand" if database_text else "forbidden token"
             errors.append(f"{location}: {category} {token}")
 
-    urls = _remote_urls(text) if allow_standard_urls else list(_REMOTE_URL_PATTERN.finditer(text))
-    if urls:
+    if _has_remote_reference(text, allow_standard_urls=allow_standard_urls):
         errors.append(f"{location}: remote URL")
 
     if production_id_pattern is not None and production_id_pattern.search(text):
@@ -151,6 +160,7 @@ def _scan_text(
 
 def _scan_source_tree(
     root: Path,
+    db_path: Path,
     production_id_pattern: re.Pattern[str] | None,
 ) -> list[str]:
     if not root.exists():
@@ -166,20 +176,33 @@ def _scan_source_tree(
 
     for path in paths:
         relative_location = str(path.relative_to(root))
-        normalized_location = path.relative_to(root).as_posix().lower()
-        for token in FORBIDDEN_SOURCE_TOKENS:
-            if token.lower() in normalized_location:
-                errors.append(f"{relative_location}: forbidden path token {token}")
+        normalized_location = path.relative_to(root).as_posix()
+        path_errors = _scan_text(
+            relative_location,
+            normalized_location,
+            production_id_pattern,
+            allow_standard_urls=True,
+        )
+        errors.extend(
+            error.replace(": forbidden token", ": forbidden path token", 1)
+            for error in path_errors
+        )
 
-        if not path.is_file() or path.suffix.lower() not in SCANNED_SOURCE_SUFFIXES:
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            errors.append(f"{relative_location}: unsupported artifact")
+            continue
+        if path.resolve() == db_path.resolve():
             continue
         try:
-            text = path.read_text(encoding="utf-8", errors="replace")
+            raw = path.read_bytes()
         except OSError as exc:
             errors.append(
                 f"{relative_location}: source read failed ({exc.__class__.__name__})"
             )
             continue
+        text = _ascii_text(raw)
         errors.extend(
             _scan_text(
                 relative_location,
@@ -242,7 +265,7 @@ def _scan_database(
                         f"{table}[{index}]",
                         value,
                         production_id_pattern,
-                        allow_standard_urls=False,
+                        allow_standard_urls=True,
                         database_text=True,
                     )
                 )
@@ -259,7 +282,11 @@ def scan_demo_artifacts(
     root = Path(root)
     db_path = Path(db_path)
     production_id_pattern = _production_id_pattern(known_youtube_ids)
-    return _scan_source_tree(root, production_id_pattern) + _scan_database(
+    errors = _scan_source_tree(root, db_path, production_id_pattern) + _scan_database(
         db_path,
         production_id_pattern,
     )
+    return [
+        _redact_production_ids(error, production_id_pattern)
+        for error in errors
+    ]
