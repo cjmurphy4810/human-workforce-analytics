@@ -238,6 +238,12 @@ def _classify_ci_tier(
     return "underperformer"
 
 
+def _is_finite_number(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return not isinstance(value, float) or math.isfinite(value)
+
+
 def build_demo_database(path: Path, *, seed: int = 8142026) -> None:
     """Generate a validated demo database and atomically install it at ``path``."""
     path = Path(path)
@@ -1148,8 +1154,8 @@ def validate_demo_database(path: Path) -> list[str]:
                         and [item["rank"] for item in ranked]
                         == list(range(1, len(ranked) + 1))
                         and all(
-                            math.isfinite(float(item["relevance_score"]))
-                            and 0 <= float(item["relevance_score"]) <= 10
+                            _is_finite_number(item["relevance_score"])
+                            and 0 <= item["relevance_score"] <= 10
                             and item.get("title")
                             and item.get("theme")
                             and item.get("why_now")
@@ -1194,9 +1200,7 @@ def validate_demo_database(path: Path) -> list[str]:
         ).fetchall()
         tiers = {row[1] for row in score_rows}
         numeric_values_valid = all(
-            isinstance(value, (int, float))
-            and not isinstance(value, bool)
-            and math.isfinite(value)
+            _is_finite_number(value)
             for row in score_rows
             for value in row[2:]
         )

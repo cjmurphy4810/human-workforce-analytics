@@ -320,3 +320,20 @@ def test_validator_returns_queue_error_for_non_object_elements(tmp_path, field):
         conn.commit()
 
     assert "publishing queue payload mismatch" in validate_demo_database(path)
+
+
+def test_validator_returns_queue_error_for_huge_integer_relevance_score(tmp_path):
+    path = tmp_path / "demo.db"
+    build_demo_database(path)
+    with sqlite3.connect(path) as conn:
+        payload = json.loads(
+            conn.execute("SELECT result_json FROM publishing_queue").fetchone()[0]
+        )
+        payload["ranked_videos"][0]["relevance_score"] = 10**400
+        conn.execute(
+            "UPDATE publishing_queue SET result_json=?",
+            (json.dumps(payload),),
+        )
+        conn.commit()
+
+    assert "publishing queue payload mismatch" in validate_demo_database(path)
