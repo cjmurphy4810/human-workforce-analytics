@@ -22,6 +22,11 @@ from promotion_intelligence.recommendation_models import (
 BUDGET_TIERS: list[float] = [5.0, 10.0, 20.0, 50.0]
 
 
+def format_projected_cost(value: float | None, *, decimals: int = 2) -> str:
+    """Format a projected unit cost without inventing a finite zero-output value."""
+    return "N/A" if value is None else f"${value:.{decimals}f}"
+
+
 def eligible_organic_lift_watch_hours(
     organic_lift_views: int,
     average_view_duration_seconds: float,
@@ -69,7 +74,7 @@ class ROICalculator:
         # and Shorts watch time is excluded entirely.
         qual_hours = eligible_organic_lift_watch_hours(
             organic_lift,
-            feat.avg_view_duration_seconds,
+            feat.avg_organic_view_duration_seconds,
             feat.length_seconds,
         )
 
@@ -82,7 +87,7 @@ class ROICalculator:
             expected_pes = round(opp.score * 0.60, 1)
 
         # ── Cost metrics ───────────────────────────────────────────────────
-        cost_per_qh = round(budget / max(qual_hours, 0.01), 3)
+        cost_per_qh = round(budget / qual_hours, 3) if qual_hours > 0 else None
         cost_per_sub = round(budget / max(projected_subs, 1), 3)
         cost_per_fo = round(budget / max(follow_on, 1), 3)
 

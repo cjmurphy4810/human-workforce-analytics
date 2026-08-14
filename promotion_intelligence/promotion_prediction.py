@@ -91,7 +91,7 @@ class PromotionPredictor:
         follow_on = self.predict_follow_on(views, feat.follow_on_rate_pct)
         qual_h = self.predict_qualifying_hours(
             lift,
-            feat.avg_view_duration_seconds,
+            feat.avg_organic_view_duration_seconds,
             feat.length_seconds,
         )
         pes = self.predict_efficiency_score(opp, lift, views)

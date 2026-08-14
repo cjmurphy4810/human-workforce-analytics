@@ -16,7 +16,11 @@ from demo.report_data import query_frame
 from demo.ui import render_demo_notice, render_demo_sidebar, render_empty_state
 from models.promotion import VideoPromotionMetrics, make_metrics
 from promotion_intelligence.promotion_prediction import PromotionPredictor
-from promotion_intelligence.promotion_roi import BUDGET_TIERS, ROICalculator
+from promotion_intelligence.promotion_roi import (
+    BUDGET_TIERS,
+    ROICalculator,
+    format_projected_cost,
+)
 from promotion_intelligence.recommendation_engine import RecommendationEngine
 from promotion_intelligence.recommendation_models import (
     PROMOTION_CLASS_COLOR,
@@ -248,11 +252,15 @@ def _opportunity_card(
 def _roi_card(estimate: ROIEstimate) -> None:
     icon = {"high": "🟢", "medium": "🟡", "low": "🔴"}.get(estimate.confidence, "⚪")
     st.markdown(f"#### ${estimate.budget:.0f} scenario {icon}")
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Simulated Views", f"{estimate.estimated_views:,}")
     c2.metric("Simulated Subscribers", f"{estimate.estimated_subscribers:,}")
     c3.metric(
         "Eligible Organic-Lift Hours", f"{estimate.estimated_qualifying_hours:.1f}"
+    )
+    c4.metric(
+        "Cost / Eligible Hour",
+        format_projected_cost(estimate.cost_per_qualified_hour_projected),
     )
     st.caption(estimate.confidence_reason)
 

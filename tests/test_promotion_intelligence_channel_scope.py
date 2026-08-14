@@ -4,6 +4,7 @@ import pytest
 
 from db import SCHEMA
 from pages import promotion_intelligence as report_page
+from promotion_intelligence.promotion_roi import ROICalculator, format_projected_cost
 
 
 def test_build_real_features_takes_channel_param():
@@ -44,12 +45,20 @@ def test_real_advertising_data_does_not_restore_qualifying_hours_for_a_short(tmp
             "channel, video_id, metric_date, traffic_source_type, views, "
             "estimated_minutes_watched, average_view_duration) "
             "VALUES (?, ?, ?, 'ADVERTISING', ?, ?, ?)",
-            ("channel-a", "short-1", "2026-08-14", 200, 120, 36),
+            ("channel-a", "short-1", "2026-08-14", 200, 20, 6),
         )
 
     [feature] = report_page._build_real_features(db_path, 0.025, "channel-a")
 
     assert feature.total_watch_hours == pytest.approx(10)
-    assert feature.organic_watch_hours == pytest.approx(8)
+    assert feature.organic_watch_hours == pytest.approx(29 / 3)
+    assert feature.avg_view_duration_seconds == pytest.approx(36)
+    assert feature.avg_organic_view_duration_seconds == pytest.approx(43.5)
     assert feature.qualifying_hours == 0
     assert feature.cost_per_qualified_hour == 0
+    estimate = ROICalculator().estimate_roi(
+        report_page.RecommendationEngine([feature]).rank_all()[0],
+        10.0,
+    )
+    assert estimate.cost_per_qualified_hour_projected is None
+    assert format_projected_cost(estimate.cost_per_qualified_hour_projected) == "N/A"

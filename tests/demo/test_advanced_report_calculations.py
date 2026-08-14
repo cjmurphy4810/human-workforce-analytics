@@ -1,3 +1,4 @@
+import dataclasses
 from datetime import date
 
 import pytest
@@ -14,7 +15,7 @@ from demo.analytics import (
 from demo.config import DEMO_CHANNEL_KEY
 from demo.db import connect_demo_db
 from promotion_intelligence.promotion_prediction import PromotionPredictor
-from promotion_intelligence.promotion_roi import ROICalculator
+from promotion_intelligence.promotion_roi import ROICalculator, format_projected_cost
 from promotion_intelligence.recommendation_models import (
     PromotionClass,
     PromotionOpportunity,
@@ -172,8 +173,51 @@ def test_roi_uses_only_eligible_organic_lift_watch_hours():
     assert long_estimate.estimated_views == 400
     assert long_estimate.estimated_organic_lift == 80
     assert long_estimate.estimated_qualifying_hours == pytest.approx(4.0)
+    assert long_estimate.cost_per_qualified_hour_projected == pytest.approx(2.5)
     assert short_estimate.estimated_organic_lift == 80
     assert short_estimate.estimated_qualifying_hours == 0.0
+    assert short_estimate.cost_per_qualified_hour_projected is None
+    assert (
+        format_projected_cost(short_estimate.cost_per_qualified_hour_projected) == "N/A"
+    )
+
+
+def test_roi_and_predictor_use_organic_duration_when_paid_duration_differs():
+    base = _opportunity("promoted")
+    promoted = dataclasses.replace(
+        base,
+        features=dataclasses.replace(
+            base.features,
+            total_views=1_000,
+            organic_views=600,
+            promotion_views=400,
+            total_watch_hours=50.0,
+            organic_watch_hours=40.0,
+            avg_view_duration_seconds=120.0,
+            avg_promotion_view_duration_seconds=90.0,
+            organic_multiplier=1.5,
+        ),
+    )
+
+    estimate = ROICalculator(cpv=0.025).estimate_roi(promoted, 10.0)
+    prediction = PromotionPredictor(cpv=0.025).predict_all(promoted, 10.0)
+
+    assert promoted.features.avg_organic_view_duration_seconds == pytest.approx(240.0)
+    assert estimate.estimated_organic_lift == 179
+    assert estimate.estimated_qualifying_hours == pytest.approx(11.93)
+    assert prediction["qualifying_hours"] == pytest.approx(11.93)
+
+
+def test_organic_duration_falls_back_when_no_organic_views_exist():
+    base = _opportunity("no-organic-history")
+    no_organic_history = dataclasses.replace(
+        base.features,
+        organic_views=0,
+        organic_watch_hours=0.0,
+        avg_view_duration_seconds=75.0,
+    )
+
+    assert no_organic_history.avg_organic_view_duration_seconds == 75.0
 
 
 def test_predictor_uses_organic_lift_and_short_eligibility_for_qualifying_hours():
