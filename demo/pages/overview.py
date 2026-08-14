@@ -217,17 +217,60 @@ if not daily_channel.empty:
     watch_days = _range_picker("demo_overview_watch")
     watch = _filter_days(daily_channel, "metric_date", watch_days).sort_values("metric_date")
     watch["watch_hours"] = watch["estimated_minutes_watched"] / 60.0
-    total_video_minutes = float(daily_videos["estimated_minutes_watched"].sum()) if not daily_videos.empty else 0.0
-    advertising_minutes = float(video_traffic.loc[video_traffic["traffic_source_type"] == "ADVERTISING", "estimated_minutes_watched"].sum()) if not video_traffic.empty else 0.0
-    qualifying_ratio = max(total_video_minutes - advertising_minutes, 0.0) / max(total_video_minutes, 1.0)
-    watch["promotion_hours"] = watch["watch_hours"] * (1 - qualifying_ratio)
-    watch["qualifying_hours"] = watch["watch_hours"] * qualifying_ratio
+    advertising_daily = (
+        video_traffic[video_traffic["traffic_source_type"] == "ADVERTISING"]
+        .groupby("metric_date", as_index=False)["estimated_minutes_watched"]
+        .sum()
+        .rename(columns={"estimated_minutes_watched": "advertising_minutes"})
+        if not video_traffic.empty
+        else pd.DataFrame(columns=["metric_date", "advertising_minutes"])
+    )
+    short_ids = set(
+        videos.loc[videos["duration_seconds"].between(1, 180), "video_id"]
+    )
+    shorts_daily = (
+        daily_videos[daily_videos["video_id"].isin(short_ids)]
+        .groupby("metric_date", as_index=False)["estimated_minutes_watched"]
+        .sum()
+        .rename(columns={"estimated_minutes_watched": "shorts_minutes"})
+    )
+    short_ads_daily = (
+        video_traffic[
+            video_traffic["video_id"].isin(short_ids)
+            & (video_traffic["traffic_source_type"] == "ADVERTISING")
+        ]
+        .groupby("metric_date", as_index=False)["estimated_minutes_watched"]
+        .sum()
+        .rename(columns={"estimated_minutes_watched": "shorts_ad_minutes"})
+    )
+    for adjustments in (advertising_daily, shorts_daily, short_ads_daily):
+        if not adjustments.empty:
+            adjustments["metric_date"] = pd.to_datetime(adjustments["metric_date"])
+            watch = watch.merge(adjustments, on="metric_date", how="left")
+    for column in ("advertising_minutes", "shorts_minutes", "shorts_ad_minutes"):
+        if column not in watch:
+            watch[column] = 0.0
+        watch[column] = watch[column].fillna(0.0)
+    watch["promotion_hours"] = watch["advertising_minutes"] / 60.0
+    watch["organic_hours"] = (watch["watch_hours"] - watch["promotion_hours"]).clip(lower=0)
+    watch["shorts_organic_hours"] = (
+        watch["shorts_minutes"] - watch["shorts_ad_minutes"]
+    ).clip(lower=0) / 60.0
+    watch["qualifying_hours"] = (
+        watch["organic_hours"] - watch["shorts_organic_hours"]
+    ).clip(lower=0)
     watch_chart = go.Figure()
     watch_chart.add_bar(x=watch["metric_date"], y=watch["qualifying_hours"], name="Qualifying hours", marker_color="#54A24B")
     watch_chart.add_bar(x=watch["metric_date"], y=watch["promotion_hours"], name="Promotion hours", marker_color="#E45756")
     watch_chart.update_layout(barmode="stack", title="Daily Watch Hours: Qualifying vs Promotion", hovermode="x unified")
     st.plotly_chart(watch_chart, use_container_width=True)
-    st.caption(f"Estimated qualifying share: {qualifying_ratio * 100:.1f}% based on summed daily traffic-source increments.")
+    selected_total = watch["watch_hours"].sum()
+    selected_qualifying = watch["qualifying_hours"].sum()
+    selected_ratio = selected_qualifying / max(selected_total, 1.0)
+    st.caption(
+        f"Selected-period qualifying share: {selected_ratio * 100:.1f}%. "
+        "Qualifying subtracts promotion and organic Shorts from the same displayed days."
+    )
 
 st.subheader("Discovery & Engagement Analysis")
 discovery_tab, engagement_tab, table_tab = st.tabs(["Traffic Sources", "Video Engagement", "Detail Table"])

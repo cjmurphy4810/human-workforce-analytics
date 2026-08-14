@@ -40,33 +40,55 @@ def _load_video_daily() -> pd.DataFrame:
     )
 
 
-def _qualifying_ratio() -> float:
-    totals = query_frame(
-        "SELECT (SELECT COALESCE(SUM(estimated_minutes_watched),0) "
-        "FROM daily_video_metrics WHERE channel=:channel AND metric_date<=:as_of) total, "
-        "(SELECT COALESCE(SUM(estimated_minutes_watched),0) "
-        "FROM video_traffic_source_metrics WHERE channel=:channel "
-        "AND metric_date<=:as_of AND traffic_source_type='ADVERTISING') advertising",
+def _load_daily_adjustments() -> pd.DataFrame:
+    return query_frame(
+        "WITH advertising AS (SELECT metric_date, SUM(estimated_minutes_watched) minutes "
+        "FROM video_traffic_source_metrics WHERE channel=:channel AND metric_date<=:as_of "
+        "AND traffic_source_type='ADVERTISING' GROUP BY metric_date), "
+        "shorts AS (SELECT d.metric_date, SUM(d.estimated_minutes_watched) minutes "
+        "FROM daily_video_metrics d JOIN videos v ON v.channel=d.channel AND v.video_id=d.video_id "
+        "WHERE d.channel=:channel AND d.metric_date<=:as_of AND v.duration_seconds>0 "
+        "AND v.duration_seconds<=180 GROUP BY d.metric_date), "
+        "short_ads AS (SELECT d.metric_date, SUM(d.estimated_minutes_watched) minutes "
+        "FROM video_traffic_source_metrics d JOIN videos v ON v.channel=d.channel "
+        "AND v.video_id=d.video_id WHERE d.channel=:channel AND d.metric_date<=:as_of "
+        "AND d.traffic_source_type='ADVERTISING' AND v.duration_seconds>0 "
+        "AND v.duration_seconds<=180 GROUP BY d.metric_date) "
+        "SELECT c.metric_date, COALESCE(a.minutes,0) advertising_minutes, "
+        "COALESCE(s.minutes,0) shorts_minutes, COALESCE(sa.minutes,0) shorts_ad_minutes "
+        "FROM daily_channel_metrics c LEFT JOIN advertising a ON a.metric_date=c.metric_date "
+        "LEFT JOIN shorts s ON s.metric_date=c.metric_date "
+        "LEFT JOIN short_ads sa ON sa.metric_date=c.metric_date "
+        "WHERE c.channel=:channel AND c.metric_date<=:as_of ORDER BY c.metric_date",
         _PARAMS,
     )
-    if totals.empty:
-        return 1.0
-    total = float(totals.iloc[0]["total"] or 0)
-    advertising = float(totals.iloc[0]["advertising"] or 0)
-    return max(total - advertising, 0.0) / max(total, 1.0)
 
 
 daily = _load_daily()
 video = _load_video_daily()
-qual_ratio = _qualifying_ratio()
+adjustments = _load_daily_adjustments()
 
 if daily.empty:
     render_empty_state("daily analytics")
     st.stop()
 
 daily["metric_date"] = pd.to_datetime(daily["metric_date"])
+if not adjustments.empty:
+    adjustments["metric_date"] = pd.to_datetime(adjustments["metric_date"])
+    daily = daily.merge(adjustments, on="metric_date", how="left")
+for column in ("advertising_minutes", "shorts_minutes", "shorts_ad_minutes"):
+    if column not in daily:
+        daily[column] = 0.0
+    daily[column] = daily[column].fillna(0.0)
 daily["watch_hours"] = daily["estimated_minutes_watched"] / 60.0
-daily["qualifying_hours"] = daily["watch_hours"] * qual_ratio
+daily["promotion_hours"] = daily["advertising_minutes"] / 60.0
+daily["organic_hours"] = (daily["watch_hours"] - daily["promotion_hours"]).clip(lower=0)
+daily["shorts_organic_hours"] = (
+    daily["shorts_minutes"] - daily["shorts_ad_minutes"]
+).clip(lower=0) / 60.0
+daily["qualifying_hours"] = (
+    daily["organic_hours"] - daily["shorts_organic_hours"]
+).clip(lower=0)
 daily["net_subs"] = daily["subscribers_gained"] - daily["subscribers_lost"]
 daily["avg_view_dur_sec"] = (
     daily["estimated_minutes_watched"] * 60.0 / daily["views"].clip(lower=1)
@@ -84,8 +106,9 @@ all_months = sorted(daily["year_month"].unique(), reverse=True)
 prior_months = [month for month in all_months if month < current_month]
 
 st.caption(
-    f"Qualifying hours use a {qual_ratio * 100:.1f}% organic ratio derived by "
-    f"summing daily traffic-source increments through {DEMO_AS_OF:%B %d, %Y}."
+    "Each daily, monthly, and selected-period qualifying value subtracts promotion "
+    "and organic Shorts from that same period through "
+    f"{DEMO_AS_OF:%B %d, %Y}."
 )
 
 st.subheader("Channel Performance by Day")

@@ -6,7 +6,11 @@ import pytest
 from demo.config import DEMO_CHANNEL_KEY, DEMO_DB_PATH
 from demo.db import connect_demo_db
 from demo.report_data import query_frame
-from qualifying_watch_hours import _build_real_metrics
+from qualifying_watch_hours import (
+    _build_real_metrics,
+    _build_real_timeseries,
+    _get_db_date_range,
+)
 
 
 def test_overview_inputs_are_non_empty():
@@ -83,7 +87,12 @@ def test_qualifying_metrics_sum_daily_increments_through_as_of(tmp_path):
         )
         conn.commit()
 
-    metrics = _build_real_metrics(path, DEMO_CHANNEL_KEY, as_of=date(2026, 8, 13))
+    metrics = _build_real_metrics(
+        path,
+        DEMO_CHANNEL_KEY,
+        as_of=date(2026, 8, 13),
+        daily_metrics_are_increments=True,
+    )
 
     assert len(metrics) == 1
     metric = metrics[0]
@@ -93,3 +102,141 @@ def test_qualifying_metrics_sum_daily_increments_through_as_of(tmp_path):
     assert metric.promotion_watch_hours == pytest.approx(20 / 60)
     assert metric.avg_view_duration_seconds == pytest.approx(105.0)
 
+
+def test_production_metrics_use_latest_cumulative_snapshot_at_as_of(tmp_path):
+    path = tmp_path / "production.db"
+    with connect_demo_db(path) as conn:
+        conn.execute(
+            "INSERT INTO videos(channel, video_id, title, published_at, duration_seconds) "
+            "VALUES (?, 'video_1', 'Fixture', '2026-01-01', 600)",
+            (DEMO_CHANNEL_KEY,),
+        )
+        conn.executemany(
+            "INSERT INTO video_snapshots(captured_at, channel, video_id, view_count, "
+            "like_count, comment_count) VALUES (?, ?, 'video_1', ?, 0, 0)",
+            [
+                ("2026-08-01T00:00:00", DEMO_CHANNEL_KEY, 100),
+                ("2026-08-10T00:00:00", DEMO_CHANNEL_KEY, 150),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO daily_video_metrics "
+            "(metric_date, channel, video_id, views, estimated_minutes_watched, "
+            "average_view_duration, likes, subscribers_gained) "
+            "VALUES (?, ?, 'video_1', ?, ?, ?, 0, 0)",
+            [
+                ("2026-08-01", DEMO_CHANNEL_KEY, 100, 600.0, 360.0),
+                ("2026-08-10", DEMO_CHANNEL_KEY, 150, 900.0, 360.0),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO video_traffic_source_metrics "
+            "(metric_date, channel, video_id, traffic_source_type, views, "
+            "estimated_minutes_watched, average_view_duration) "
+            "VALUES (?, ?, 'video_1', 'ADVERTISING', ?, ?, 180)",
+            [
+                ("2026-08-01", DEMO_CHANNEL_KEY, 20, 60.0),
+                ("2026-08-10", DEMO_CHANNEL_KEY, 30, 90.0),
+            ],
+        )
+        conn.commit()
+
+    metrics = _build_real_metrics(
+        path,
+        DEMO_CHANNEL_KEY,
+        as_of=date(2026, 8, 10),
+    )
+
+    assert len(metrics) == 1
+    assert metrics[0].total_views == 150
+    assert metrics[0].total_watch_hours == pytest.approx(15.0)
+    assert metrics[0].promotion_views == 30
+    assert metrics[0].promotion_watch_hours == pytest.approx(1.5)
+
+
+def test_incremental_timeseries_matches_each_window_and_excludes_shorts(tmp_path):
+    path = tmp_path / "changing_mix.db"
+    with connect_demo_db(path) as conn:
+        conn.executemany(
+            "INSERT INTO videos(channel, video_id, title, duration_seconds) "
+            "VALUES (?, ?, ?, ?)",
+            [
+                (DEMO_CHANNEL_KEY, "long", "Long", 600),
+                (DEMO_CHANNEL_KEY, "short", "Short", 120),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO daily_channel_metrics VALUES (?, ?, ?, ?, 0, 0)",
+            [
+                ("2026-08-07", DEMO_CHANNEL_KEY, 600, 600.0),
+                ("2026-08-14", DEMO_CHANNEL_KEY, 600, 600.0),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO daily_video_metrics "
+            "(metric_date, channel, video_id, views, estimated_minutes_watched, "
+            "average_view_duration, likes, subscribers_gained) "
+            "VALUES (?, ?, ?, ?, ?, 60, 0, 0)",
+            [
+                ("2026-08-07", DEMO_CHANNEL_KEY, "long", 400, 400.0),
+                ("2026-08-07", DEMO_CHANNEL_KEY, "short", 200, 200.0),
+                ("2026-08-14", DEMO_CHANNEL_KEY, "long", 600, 600.0),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO video_traffic_source_metrics VALUES (?, ?, ?, ?, ?, ?, 60)",
+            [
+                ("2026-08-07", DEMO_CHANNEL_KEY, "long", "ADVERTISING", 300, 300.0),
+                ("2026-08-07", DEMO_CHANNEL_KEY, "long", "YT_SEARCH", 100, 100.0),
+                ("2026-08-07", DEMO_CHANNEL_KEY, "short", "YT_SEARCH", 200, 200.0),
+                ("2026-08-14", DEMO_CHANNEL_KEY, "long", "YT_SEARCH", 600, 600.0),
+            ],
+        )
+        conn.commit()
+
+    result = _build_real_timeseries(
+        path,
+        DEMO_CHANNEL_KEY,
+        as_of=date(2026, 8, 14),
+        daily_metrics_are_increments=True,
+    )
+
+    assert result["promotion_hours"].tolist() == pytest.approx([5.0, 0.0])
+    assert result["organic_hours"].tolist() == pytest.approx([5.0, 10.0])
+    assert result["qualifying_hours"].tolist() == pytest.approx([100 / 60, 10.0])
+
+
+def test_db_date_range_matches_trailing_year_window(tmp_path):
+    path = tmp_path / "date_range.db"
+    with connect_demo_db(path) as conn:
+        conn.executemany(
+            "INSERT INTO daily_channel_metrics VALUES (?, ?, 1, 60, 0, 0)",
+            [
+                ("2025-08-14", DEMO_CHANNEL_KEY),
+                ("2025-08-15", DEMO_CHANNEL_KEY),
+                ("2026-08-14", DEMO_CHANNEL_KEY),
+            ],
+        )
+        conn.commit()
+
+    assert _get_db_date_range(
+        path, DEMO_CHANNEL_KEY, as_of=date(2026, 8, 14)
+    ) == ("2025-08-15", "2026-08-14")
+
+
+def test_video_metadata_without_metrics_is_not_real_data(tmp_path):
+    path = tmp_path / "metadata_only.db"
+    with connect_demo_db(path) as conn:
+        conn.execute(
+            "INSERT INTO videos(channel, video_id, title, duration_seconds) "
+            "VALUES (?, 'video_1', 'Metadata only', 600)",
+            (DEMO_CHANNEL_KEY,),
+        )
+        conn.commit()
+
+    assert _build_real_metrics(
+        path,
+        DEMO_CHANNEL_KEY,
+        as_of=date(2026, 8, 14),
+        daily_metrics_are_increments=True,
+    ) == []

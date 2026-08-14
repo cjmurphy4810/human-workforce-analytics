@@ -14,4 +14,5 @@ report.render(
     as_of=DEMO_AS_OF,
     empty_message="The simulated qualifying watch-hour dataset is temporarily unavailable.",
     fixed_data_source=True,
+    daily_metrics_are_increments=True,
 )

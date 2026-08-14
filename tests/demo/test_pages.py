@@ -27,3 +27,8 @@ def test_core_demo_pages_use_demo_data_boundary():
         assert "data.db" not in source
         assert "from db import DB_PATH" not in source
         assert "authenticated" not in source
+
+
+def test_qualifying_demo_explicitly_uses_increment_storage_contract():
+    source = (DEMO_ROOT / "pages" / "qualifying_watch_hours.py").read_text()
+    assert "daily_metrics_are_increments=True" in source
