@@ -9,3 +9,4 @@ token.json
 .oauth_credentials.json
 *.log
 .DS_Store
+.worktrees/
