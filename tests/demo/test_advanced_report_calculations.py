@@ -208,16 +208,34 @@ def test_roi_and_predictor_use_organic_duration_when_paid_duration_differs():
     assert prediction["qualifying_hours"] == pytest.approx(11.93)
 
 
-def test_organic_duration_falls_back_when_no_organic_views_exist():
-    base = _opportunity("no-organic-history")
-    no_organic_history = dataclasses.replace(
-        base.features,
-        organic_views=0,
-        organic_watch_hours=0.0,
-        avg_view_duration_seconds=75.0,
+def test_all_paid_video_has_no_eligible_organic_lift_hours():
+    base = _opportunity("all-paid")
+    all_paid = dataclasses.replace(
+        base,
+        features=dataclasses.replace(
+            base.features,
+            total_views=400,
+            promotion_views=400,
+            total_watch_hours=10.0,
+            qualifying_hours=0.0,
+            avg_view_duration_seconds=90.0,
+            avg_promotion_view_duration_seconds=90.0,
+            promotion_ratio_pct=100.0,
+            organic_multiplier=0.0,
+            organic_views=0,
+            organic_watch_hours=0.0,
+            promotion_cost_estimated=10.0,
+        ),
     )
 
-    assert no_organic_history.avg_organic_view_duration_seconds == 75.0
+    estimate = ROICalculator(cpv=0.025).estimate_roi(all_paid, 10.0)
+    prediction = PromotionPredictor(cpv=0.025).predict_all(all_paid, 10.0)
+
+    assert all_paid.features.avg_organic_view_duration_seconds == 0.0
+    assert estimate.estimated_qualifying_hours == 0.0
+    assert estimate.cost_per_qualified_hour_projected is None
+    assert format_projected_cost(estimate.cost_per_qualified_hour_projected) == "N/A"
+    assert prediction["qualifying_hours"] == 0.0
 
 
 def test_predictor_uses_organic_lift_and_short_eligibility_for_qualifying_hours():

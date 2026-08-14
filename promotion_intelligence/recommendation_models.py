@@ -97,7 +97,7 @@ class VideoFeatures:
     def avg_organic_view_duration_seconds(self) -> float:
         """Derive organic duration from organic watch hours and views."""
         if self.organic_views <= 0:
-            return max(self.avg_view_duration_seconds, 0.0)
+            return 0.0
         return max(self.organic_watch_hours, 0.0) * 3600.0 / self.organic_views
 
 
