@@ -10,7 +10,11 @@ import plotly.express as px
 import streamlit as st
 
 from analytics.organic_momentum import MomentumScorer, calculate_growth_rate
-from demo.analytics import aggregate_video_window
+from demo.analytics import (
+    aggregate_video_window,
+    eligible_organic_watch_hours,
+    organic_window_totals,
+)
 from demo.config import DEMO_AS_OF, DEMO_CHANNEL_KEY, DEMO_DB_PATH
 from demo.report_data import query_frame
 from demo.ui import render_demo_notice, render_demo_sidebar, render_empty_state
@@ -55,7 +59,11 @@ def _window_map(start, end) -> dict[str, dict[str, object]]:
     return {
         str(row["video_id"]): row
         for row in aggregate_video_window(
-            DEMO_DB_PATH, start=start, end=end, channel=DEMO_CHANNEL_KEY
+            DEMO_DB_PATH,
+            start=start,
+            end=end,
+            channel=DEMO_CHANNEL_KEY,
+            include_observed_days=True,
         )
     }
 
@@ -90,29 +98,36 @@ def _load_metrics(weights_json: str) -> list[OrganicMomentumMetrics]:
         advertising = sources.get("ADVERTISING", {})
         recent_advertising = recent_sources.get("ADVERTISING", {})
 
+        length = int(row.get("duration_seconds") or 0)
         total_views = int(total["views"])
         total_hours = float(total["estimated_minutes_watched"]) / 60.0
         advertising_views = int(advertising.get("views", 0))
         advertising_hours = (
             float(advertising.get("estimated_minutes_watched", 0.0)) / 60.0
         )
-        organic_views = max(total_views - advertising_views, 0)
-        qualifying_hours = max(total_hours - advertising_hours, 0.0)
-        recent_views = int(recent_row.get("views", 0))
-        baseline_views = int(baseline_row.get("views", 0))
-        recent_hours = float(recent_row.get("estimated_minutes_watched", 0.0)) / 60.0
-        baseline_hours = (
-            float(baseline_row.get("estimated_minutes_watched", 0.0)) / 60.0
+        organic_total = organic_window_totals(total)
+        organic_recent = organic_window_totals(recent_row)
+        organic_baseline = organic_window_totals(baseline_row)
+        organic_views = int(organic_total["views"])
+        qualifying_hours = eligible_organic_watch_hours(
+            length,
+            total_hours,
+            advertising_hours,
         )
-        view_growth = calculate_growth_rate(recent_views / 30.0, baseline_views / 30.0)
-        hour_growth = calculate_growth_rate(recent_hours / 30.0, baseline_hours / 30.0)
-        recent_organic = max(recent_views - int(recent_advertising.get("views", 0)), 0)
-        recent_organic_hours = max(
-            recent_hours
-            - float(recent_advertising.get("estimated_minutes_watched", 0.0)) / 60.0,
-            0.0,
+        recent_days = max(int(recent_row.get("observed_days", 0)), 1)
+        baseline_days = max(int(baseline_row.get("observed_days", 0)), 1)
+        recent_daily_views = float(organic_recent["views"]) / recent_days
+        baseline_daily_views = float(organic_baseline["views"]) / baseline_days
+        recent_daily_hours = float(organic_recent["watch_hours"]) / recent_days
+        baseline_daily_hours = float(organic_baseline["watch_hours"]) / baseline_days
+        view_growth = calculate_growth_rate(recent_daily_views, baseline_daily_views)
+        hour_growth = calculate_growth_rate(recent_daily_hours, baseline_daily_hours)
+        recent_organic = int(organic_recent["views"])
+        recent_organic_hours = eligible_organic_watch_hours(
+            length,
+            float(recent_row.get("estimated_minutes_watched", 0.0)) / 60.0,
+            float(recent_advertising.get("estimated_minutes_watched", 0.0)) / 60.0,
         )
-        length = int(row.get("duration_seconds") or 0)
         average_duration = float(total["average_view_duration"])
         average_percentage = (
             min(average_duration / length * 100.0, 100.0) if length else 0.0
@@ -164,9 +179,9 @@ def _load_metrics(weights_json: str) -> list[OrganicMomentumMetrics]:
                 ),
                 view_growth_rate=max(-1.0, min(5.0, view_growth)),
                 wh_growth_rate=max(-1.0, min(5.0, hour_growth)),
-                recent_daily_views=recent_views / 30.0,
-                peak_daily_views=max(recent_views, baseline_views) / 30.0,
-                data_points=60,
+                recent_daily_views=recent_daily_views,
+                peak_daily_views=max(recent_daily_views, baseline_daily_views),
+                data_points=int(total.get("observed_days", 0)),
                 organic_momentum_score=0.0,
                 score_breakdown=ScoreBreakdown(),
                 classification=MomentumClass.insufficient_data,
@@ -293,6 +308,7 @@ rows = [
         "Recent Views/Day": round(m.recent_daily_views, 1),
         "View Growth %": round(m.view_growth_rate * 100, 1),
         "Score": round(m.organic_momentum_score, 1),
+        "Classification": m.classification.value,
         "Class": f"{MOMENTUM_CLASS_ICON.get(m.classification, '')} {m.classification.value}",
         "Action": m.recommended_action,
     }
@@ -368,7 +384,7 @@ with tab_charts:
             x="Score",
             y="Title",
             orientation="h",
-            color="Class",
+            color="Classification",
             color_discrete_map=colors,
         ),
         width="stretch",

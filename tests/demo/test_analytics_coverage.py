@@ -60,8 +60,10 @@ def test_content_intelligence_inputs_cover_every_ui_tier_and_asset_variety():
         tiers = {
             row[0]
             for row in conn.execute(
-                "SELECT DISTINCT tier FROM ci_video_scores WHERE channel = ?",
-                (DEMO_CHANNEL_KEY,),
+                "SELECT DISTINCT tier FROM ci_video_scores WHERE channel = ? "
+                "AND scored_at = (SELECT MAX(scored_at) FROM ci_video_scores "
+                "WHERE channel = ? AND scored_at <= ?)",
+                (DEMO_CHANNEL_KEY, DEMO_CHANNEL_KEY, date(2026, 8, 14).isoformat()),
             )
         }
         asset_types = {

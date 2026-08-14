@@ -14,7 +14,12 @@ from content_intelligence.models import (
     Episode,
 )
 from content_intelligence.service import ContentIntelligenceService, load_assets
-from demo.analytics import aggregate_video_window
+from demo.analytics import (
+    aggregate_video_window,
+    content_repackaging_rows,
+    content_tier_rows,
+    rank_persisted_content_rows,
+)
 from demo.config import DEMO_AS_OF, DEMO_CHANNEL_KEY, DEMO_DB_PATH
 from demo.report_data import query_frame
 from demo.ui import render_demo_notice, render_demo_sidebar, render_empty_state
@@ -52,14 +57,13 @@ def _load_scored_library() -> list[dict[str, object]]:
     )
     persisted_scores = query_frame(
         "SELECT video_id, tier, overall_score, engagement_score, evergreen_score, "
-        "subscriber_magnet_score, hidden_gem_score FROM ci_video_scores "
+        "subscriber_magnet_score, hidden_gem_score, watch_rate_pct "
+        "FROM ci_video_scores "
         "WHERE channel=:channel AND scored_at=(SELECT MAX(scored_at) FROM ci_video_scores "
         "WHERE channel=:channel AND scored_at<=:as_of)",
         {"channel": DEMO_CHANNEL_KEY, "as_of": DEMO_AS_OF.isoformat()},
     )
-    tier_map = {
-        str(row["video_id"]): row for row in persisted_scores.to_dict("records")
-    }
+    video_map = {str(row["video_id"]): row for row in videos.to_dict("records")}
 
     episodes: list[Episode] = []
     snapshots: list[AnalyticsSnapshot] = []
@@ -101,12 +105,18 @@ def _load_scored_library() -> list[dict[str, object]]:
         snapshots.append(snapshot)
         snapshot_map[video_id] = snapshot
 
-    ranked = _SVC._scorer.rank_episodes(episodes, snapshots)
+    scored_signals = _SVC._scorer.rank_episodes(episodes, snapshots)
+    classification_map = {
+        episode.id: list(episode.classifications) for episode in scored_signals
+    }
     rows: list[dict[str, object]] = []
-    for episode in ranked:
-        snapshot = snapshot_map[episode.id]
-        persisted = tier_map.get(episode.id, {})
-        classifications = list(episode.classifications)
+    for persisted in persisted_scores.to_dict("records"):
+        video_id = str(persisted["video_id"])
+        metadata = video_map.get(video_id)
+        snapshot = snapshot_map.get(video_id)
+        if metadata is None or snapshot is None:
+            continue
+        classifications = classification_map.get(video_id, [])
         actions = [
             CLASSIFICATION_ACTIONS[label]
             for label in classifications
@@ -114,12 +124,12 @@ def _load_scored_library() -> list[dict[str, object]]:
         ]
         rows.append(
             {
-                "video_id": episode.id,
-                "title": episode.title,
-                "score": round(
-                    episode.score or float(persisted.get("overall_score", 0.0)), 1
-                ),
-                "tier": str(persisted.get("tier", "average")),
+                "video_id": video_id,
+                "title": str(metadata.get("title") or video_id),
+                "score": round(float(persisted["overall_score"]), 1),
+                "overall_score": float(persisted["overall_score"]),
+                "tier": str(persisted["tier"]),
+                "watch_rate_pct": float(persisted["watch_rate_pct"]),
                 "views": snapshot.views,
                 "watch_hours": snapshot.watch_hours,
                 "subscribers_gained": snapshot.subscribers_gained,
@@ -135,7 +145,7 @@ def _load_scored_library() -> list[dict[str, object]]:
                 "hidden_gem_score": float(persisted.get("hidden_gem_score", 0.0)),
             }
         )
-    return rows
+    return rank_persisted_content_rows(rows)
 
 
 @st.cache_data(ttl=300)
@@ -268,31 +278,17 @@ with tab_top:
 
 with tab_magnets:
     st.subheader("Subscriber Magnets")
-    magnets = [
-        row
-        for row in rows
-        if row["tier"] == "subscriber_magnet"
-        or "subscriber_magnet" in row["classifications"]
-    ]
+    magnets = content_tier_rows(rows, "subscriber_magnet")
     _panel(magnets, "No subscriber magnets meet the current scoring thresholds.")
 
 with tab_gems:
     st.subheader("Hidden Gems")
-    gems = [
-        row
-        for row in rows
-        if row["tier"] == "hidden_gem" or "hidden_gem" in row["classifications"]
-    ]
+    gems = content_tier_rows(rows, "hidden_gem")
     _panel(gems, "No hidden gems meet the current scoring thresholds.")
 
 with tab_repackaging:
     st.subheader("Repackaging Opportunities")
-    repackaging = [
-        row
-        for row in rows
-        if "needs_repackaging" in row["classifications"]
-        or (row["tier"] == "underperformer" and float(row["avg_pct_viewed"]) >= 45.0)
-    ]
+    repackaging = content_repackaging_rows(rows)
     _panel(repackaging, "No repackaging opportunities meet the current thresholds.")
 
 with tab_assets:

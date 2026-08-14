@@ -10,7 +10,7 @@ import plotly.express as px
 import streamlit as st
 
 from analytics.promotion_efficiency import compute_efficiency_scores
-from demo.analytics import aggregate_video_window
+from demo.analytics import aggregate_video_window, filter_promotion_opportunities
 from demo.config import DEMO_AS_OF, DEMO_CHANNEL_KEY, DEMO_DB_PATH
 from demo.report_data import query_frame
 from demo.ui import render_demo_notice, render_demo_sidebar, render_empty_state
@@ -252,7 +252,7 @@ def _roi_card(estimate: ROIEstimate) -> None:
     c1.metric("Simulated Views", f"{estimate.estimated_views:,}")
     c2.metric("Simulated Subscribers", f"{estimate.estimated_subscribers:,}")
     c3.metric(
-        "Simulated Qualifying Hours", f"{estimate.estimated_qualifying_hours:.1f}"
+        "Eligible Organic-Lift Hours", f"{estimate.estimated_qualifying_hours:.1f}"
     )
     st.caption(estimate.confidence_reason)
 
@@ -300,11 +300,11 @@ engine = RecommendationEngine(
     saturation_promo_ratio=float(saturation),
 )
 opportunities = engine.rank_all()
-filtered = [
-    item
-    for item in opportunities
-    if item.features.topic in selected_topics and item.score >= minimum_score
-]
+filtered = filter_promotion_opportunities(
+    opportunities,
+    topics=set(selected_topics),
+    minimum_score=minimum_score,
+)
 
 counts = {classification: 0 for classification in PromotionClass}
 for item in filtered:
@@ -328,7 +328,7 @@ tab_cards, tab_all, tab_roi, tab_visuals, tab_explain = st.tabs(
 )
 
 with tab_cards:
-    cards = engine.get_cards(opportunities)
+    cards = engine.get_cards(filtered)
     st.subheader("Top Videos to Promote")
     if cards.top_10_to_promote:
         for item in cards.top_10_to_promote:
@@ -388,7 +388,8 @@ with tab_roi:
     st.subheader("ROI Calculator")
     st.caption(
         "Financial figures are simulated planning scenarios, not forecasts or guarantees. "
-        f"Scenarios use a configurable ${cpv:.3f} cost per view."
+        f"Scenarios use a configurable ${cpv:.3f} cost per view. Eligible hours model "
+        "only projected long-form organic lift; paid watch time and Shorts are excluded."
     )
     if filtered:
         selected_index = st.selectbox(

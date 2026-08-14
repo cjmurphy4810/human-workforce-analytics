@@ -8,6 +8,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+from demo.analytics import eligible_organic_watch_hours
 from demo.config import DEMO_AS_OF, DEMO_CHANNEL_KEY
 from demo.report_data import query_frame
 from demo.ui import render_demo_notice, render_demo_sidebar, render_empty_state
@@ -63,7 +64,8 @@ def _load_video_window() -> pd.DataFrame:
         "FROM video_traffic_source_metrics WHERE channel=:channel "
         "AND metric_date BETWEEN :start AND :as_of "
         "AND traffic_source_type='ADVERTISING' GROUP BY video_id) "
-        "SELECT v.video_id, COALESCE(m.views,0) views, COALESCE(m.watch_hours,0) watch_hours, "
+        "SELECT v.video_id, COALESCE(v.duration_seconds,0) duration_seconds, "
+        "COALESCE(m.views,0) views, COALESCE(m.watch_hours,0) watch_hours, "
         "COALESCE(m.average_view_duration,0) average_view_duration, "
         "COALESCE(m.subscribers_gained,0) subscribers_gained, "
         "COALESCE(a.advertising_hours,0) advertising_hours "
@@ -88,6 +90,7 @@ def _group_stats(
         "advertising_hours",
         "subscribers_gained",
         "average_view_duration",
+        "duration_seconds",
     ):
         selected[column] = selected[column].fillna(0.0)
     count = int(selected["video_id"].nunique())
@@ -95,8 +98,16 @@ def _group_stats(
         return {"group": label, "video_count": 0}
     views = float(selected["views"].sum())
     watch_hours = float(selected["watch_hours"].sum())
-    advertising_hours = float(selected["advertising_hours"].sum())
-    qualifying_hours = max(watch_hours - advertising_hours, 0.0)
+    qualifying_hours = float(
+        selected.apply(
+            lambda row: eligible_organic_watch_hours(
+                int(row["duration_seconds"]),
+                float(row["watch_hours"]),
+                float(row["advertising_hours"]),
+            ),
+            axis=1,
+        ).sum()
+    )
     subscribers = float(selected["subscribers_gained"].sum())
     average_duration = float(
         (selected["average_view_duration"] * selected["views"]).sum() / max(views, 1.0)
@@ -156,8 +167,9 @@ if group_frame.empty:
     st.stop()
 
 st.caption(
-    "Qualifying hours subtract ADVERTISING watch time within the same selected window. "
-    "Playlist groups are de-duplicated before aggregation."
+    "Qualifying hours are summed per video: Shorts are zero and long-form videos subtract "
+    "ADVERTISING watch time within the same selected window. Playlist groups are "
+    "de-duplicated before aggregation."
 )
 
 show_mode = st.radio(
