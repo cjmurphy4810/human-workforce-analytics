@@ -327,6 +327,52 @@ def test_scanner_redacts_nfkc_equivalent_production_content_from_path(tmp_path):
     assert all(compatibility_copy not in error for error in errors)
 
 
+@pytest.mark.parametrize("path_kind", ["file", "directory"])
+def test_scanner_redacts_short_unicode_production_content_from_relative_paths(
+    tmp_path,
+    path_kind,
+):
+    root = tmp_path / "demo"
+    root.mkdir()
+    production_copy = "Café"
+    if path_kind == "file":
+        leak_path = root / f"{production_copy}.py"
+    else:
+        leaked_directory = root / production_copy
+        leaked_directory.mkdir()
+        leak_path = leaked_directory / "leak.py"
+    leak_path.write_text("youtube_client", encoding="utf-8")
+    db_path = tmp_path / "demo.db"
+    _create_scannable_database(db_path)
+
+    errors = scan_demo_artifacts(
+        root,
+        db_path,
+        known_production_texts={production_copy},
+    )
+
+    assert any("forbidden token youtube_client" in error for error in errors)
+    assert any("<redacted-production-content>" in error for error in errors)
+    assert all(production_copy not in error for error in errors)
+
+
+def test_scanner_redacts_short_unicode_production_content_from_source_root(tmp_path):
+    production_copy = "Café"
+    missing_root = tmp_path / production_copy
+    db_path = tmp_path / "demo.db"
+    _create_scannable_database(db_path)
+
+    errors = scan_demo_artifacts(
+        missing_root,
+        db_path,
+        known_production_texts={production_copy},
+    )
+
+    assert any("source root is missing" in error for error in errors)
+    assert any("<redacted-production-content>" in error for error in errors)
+    assert all(production_copy not in error for error in errors)
+
+
 def test_scanner_decodes_escaped_unicode_in_publishing_queue_json(tmp_path):
     root = tmp_path / "demo"
     root.mkdir()

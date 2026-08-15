@@ -437,10 +437,11 @@ def _scan_source_tree(
     db_path: Path,
     production_id_pattern: re.Pattern[str] | None,
     production_content: frozenset[str],
+    redacted_content: frozenset[str],
 ) -> list[str]:
     root_location = _redact_production_content_location(
         str(root),
-        production_content,
+        redacted_content,
     )
     if not root.exists():
         return [f"{root_location}: source root is missing"]
@@ -459,7 +460,7 @@ def _scan_source_tree(
         relative_path = path.relative_to(root)
         relative_location = _redact_production_content_location(
             str(relative_path),
-            production_content,
+            redacted_content,
         )
         normalized_location = relative_path.as_posix()
         path_errors = _scan_text(
@@ -602,6 +603,7 @@ def scan_demo_artifacts(
         db_path,
         production_id_pattern,
         distinctive_production_content,
+        all_production_content,
     ) + _scan_database(
         db_path,
         production_id_pattern,
