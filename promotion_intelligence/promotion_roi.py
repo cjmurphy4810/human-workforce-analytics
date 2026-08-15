@@ -10,6 +10,7 @@ The organic_lift_ratio is derived from historical data where available:
 When no promotion history exists, the ratio is inferred from the
 Promotion Opportunity Score (10–30% range).
 """
+
 from __future__ import annotations
 
 from promotion_intelligence.recommendation_models import (
@@ -19,6 +20,25 @@ from promotion_intelligence.recommendation_models import (
 )
 
 BUDGET_TIERS: list[float] = [5.0, 10.0, 20.0, 50.0]
+
+
+def format_projected_cost(value: float | None, *, decimals: int = 2) -> str:
+    """Format a projected unit cost without inventing a finite zero-output value."""
+    return "N/A" if value is None else f"${value:.{decimals}f}"
+
+
+def eligible_organic_lift_watch_hours(
+    organic_lift_views: int,
+    average_view_duration_seconds: float,
+    length_seconds: int,
+) -> float:
+    """Convert projected organic-lift views into eligible long-form watch hours."""
+    if 0 < length_seconds <= 180:
+        return 0.0
+    return round(
+        max(organic_lift_views, 0) * max(average_view_duration_seconds, 0.0) / 3600.0,
+        2,
+    )
 
 
 class ROICalculator:
@@ -49,12 +69,14 @@ class ROICalculator:
         # ── Follow-on views ────────────────────────────────────────────────
         follow_on = max(0, int(projected_views * feat.follow_on_rate_pct / 100.0))
 
-        # ── Qualifying hours ───────────────────────────────────────────────
-        # Promoted viewers watch less than organic — use historical avg promo duration
-        promo_dur = feat.avg_promotion_view_duration_seconds
-        if promo_dur <= 0:
-            promo_dur = feat.avg_view_duration_seconds * 0.40  # estimate: 40% of avg
-        qual_hours = round(projected_views * promo_dur / 3600.0, 2)
+        # ── Qualifying organic-lift hours ─────────────────────────────────
+        # Paid watch time is ineligible. Only modeled organic lift can contribute,
+        # and Shorts watch time is excluded entirely.
+        qual_hours = eligible_organic_lift_watch_hours(
+            organic_lift,
+            feat.avg_organic_view_duration_seconds,
+            feat.length_seconds,
+        )
 
         # ── Expected PES ───────────────────────────────────────────────────
         if feat.promotion_efficiency_score > 0:
@@ -65,7 +87,7 @@ class ROICalculator:
             expected_pes = round(opp.score * 0.60, 1)
 
         # ── Cost metrics ───────────────────────────────────────────────────
-        cost_per_qh = round(budget / max(qual_hours, 0.01), 3)
+        cost_per_qh = round(budget / qual_hours, 3) if qual_hours > 0 else None
         cost_per_sub = round(budget / max(projected_subs, 1), 3)
         cost_per_fo = round(budget / max(follow_on, 1), 3)
 

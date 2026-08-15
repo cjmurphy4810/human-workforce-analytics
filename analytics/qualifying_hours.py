@@ -2,7 +2,8 @@
 Qualifying watch hours calculations.
 
 Core formula:
-  Estimated Qualifying Hours = Total Watch Hours - Promotion Watch Hours
+  Organic Watch Hours = Total Watch Hours - Promotion Watch Hours
+  Estimated Qualifying Hours = Organic Watch Hours, excluding Shorts
   Promotion Watch Hours = Promotion Views × Avg Promotion View Duration (seconds) / 3600
 
 When avg promotion view duration is unavailable, estimate using the overall average
@@ -24,7 +25,8 @@ def compute_qualifying_hours(
 ) -> QualifyingHoursReport:
     total_wh = sum(m.total_watch_hours for m in metrics)
     promo_wh = sum(m.promotion_watch_hours for m in metrics)
-    organic_wh = max(total_wh - promo_wh, 0)
+    organic_wh = sum(m.organic_watch_hours for m in metrics)
+    qualifying_wh = sum(m.estimated_qualifying_hours for m in metrics)
     total_organic_views = sum(m.organic_views for m in metrics)
 
     avg_organic_dur = 0.0
@@ -36,7 +38,7 @@ def compute_qualifying_hours(
         ) / total_organic_views
 
     return QualifyingHoursReport(
-        estimated_qualifying_hours=organic_wh,
+        estimated_qualifying_hours=qualifying_wh,
         promotion_watch_hours=promo_wh,
         organic_watch_hours=organic_wh,
         promotion_pct=(promo_wh / max(total_wh, 1)) * 100,
@@ -55,12 +57,17 @@ def recompute_with_sim_duration(
     for m in metrics:
         promo_wh = m.promotion_views * sim_duration_seconds / 3600
         organic_wh = max(m.total_watch_hours - promo_wh, 0)
-        cost_per_qual = m.promotion_cost / organic_wh if organic_wh > 0 and m.promotion_cost > 0 else 0.0
+        qualifying_wh = 0.0 if 0 < m.length_seconds <= 180 else organic_wh
+        cost_per_qual = (
+            m.promotion_cost / qualifying_wh
+            if qualifying_wh > 0 and m.promotion_cost > 0
+            else 0.0
+        )
         result.append(dataclasses.replace(
             m,
             promotion_watch_hours=promo_wh,
             organic_watch_hours=organic_wh,
-            estimated_qualifying_hours=organic_wh,
+            estimated_qualifying_hours=qualifying_wh,
             cost_per_qualified_hour=cost_per_qual,
             avg_promotion_view_duration_seconds=sim_duration_seconds,
             promotion_duration_estimated=True,

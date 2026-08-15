@@ -4,8 +4,10 @@ Separate from ROICalculator so callers can invoke individual predictions
 (e.g. just predict_views for quick what-ifs) without constructing a full
 ROIEstimate.
 """
+
 from __future__ import annotations
 
+from promotion_intelligence.promotion_roi import eligible_organic_lift_watch_hours
 from promotion_intelligence.recommendation_models import PromotionOpportunity
 
 
@@ -50,13 +52,16 @@ class PromotionPredictor:
 
     def predict_qualifying_hours(
         self,
-        projected_views: int,
+        organic_lift_views: int,
         avg_view_duration_s: float,
-        avg_promo_duration_s: float = 0.0,
+        length_seconds: int,
     ) -> float:
-        """Qualifying hours = promoted views × avg promotional view duration."""
-        effective_dur = avg_promo_duration_s if avg_promo_duration_s > 0 else avg_view_duration_s * 0.40
-        return round(projected_views * effective_dur / 3600.0, 2)
+        """Estimate eligible hours from organic-lift views; Shorts produce zero."""
+        return eligible_organic_lift_watch_hours(
+            organic_lift_views,
+            avg_view_duration_s,
+            length_seconds,
+        )
 
     def predict_efficiency_score(
         self,
@@ -85,9 +90,9 @@ class PromotionPredictor:
         lift = self.predict_organic_lift(views, feat.organic_multiplier, opp.score)
         follow_on = self.predict_follow_on(views, feat.follow_on_rate_pct)
         qual_h = self.predict_qualifying_hours(
-            views,
-            feat.avg_view_duration_seconds,
-            feat.avg_promotion_view_duration_seconds,
+            lift,
+            feat.avg_organic_view_duration_seconds,
+            feat.length_seconds,
         )
         pes = self.predict_efficiency_score(opp, lift, views)
         return {
@@ -127,7 +132,7 @@ class PromotionPredictor:
             )
         if qualifying_hours >= 5:
             parts.append(
-                f"Projected {qualifying_hours:.1f} qualifying hours contributes"
-                " directly to YPP eligibility."
+                f"The model projects {qualifying_hours:.1f} eligible organic-lift watch hours;"
+                " actual YPP eligibility remains subject to YouTube's rules and reporting."
             )
         return " ".join(parts)

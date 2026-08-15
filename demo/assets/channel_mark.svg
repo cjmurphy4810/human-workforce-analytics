@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" role="img" aria-label="AEG circuit mark">
+  <rect width="160" height="160" rx="28" fill="#102A43"/>
+  <g fill="none" stroke="#64D8CB" stroke-linecap="round" stroke-linejoin="round" stroke-width="7">
+    <path d="M42 48h27l16 24h31"/>
+    <path d="M42 112h27l16-24h31"/>
+    <path d="M85 72v16"/>
+  </g>
+  <g fill="#F8FAFC">
+    <circle cx="42" cy="48" r="9"/>
+    <circle cx="116" cy="72" r="9"/>
+    <circle cx="42" cy="112" r="9"/>
+    <circle cx="116" cy="88" r="9"/>
+  </g>
+  <text x="80" y="143" fill="#F8FAFC" font-size="22" font-weight="700" letter-spacing="3" text-anchor="middle">AEG</text>
+</svg>

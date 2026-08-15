@@ -93,6 +93,13 @@ class VideoFeatures:
     data_source: str = "NONE"              # API_ACTUAL | ESTIMATED | NONE
     has_sufficient_data: bool = True
 
+    @property
+    def avg_organic_view_duration_seconds(self) -> float:
+        """Derive organic duration from organic watch hours and views."""
+        if self.organic_views <= 0:
+            return 0.0
+        return max(self.organic_watch_hours, 0.0) * 3600.0 / self.organic_views
+
 
 # ── Score breakdown ───────────────────────────────────────────────────────────
 
@@ -158,7 +165,7 @@ class ROIEstimate:
     estimated_qualifying_hours: float
     expected_promotion_efficiency: float
 
-    cost_per_qualified_hour_projected: float
+    cost_per_qualified_hour_projected: Optional[float]
     cost_per_subscriber_projected: float
     cost_per_follow_on_projected: float
 

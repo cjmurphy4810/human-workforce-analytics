@@ -4,15 +4,16 @@ Qualifying Watch Hours dashboard page.
 Answers: "For every dollar spent promoting a video, how many qualifying watch hours
 did we actually create?"
 
-Qualifying hours = Total Watch Hours - Promotion Watch Hours.
-Promotion Watch Hours = Promotion Views × Avg Promotion View Duration.
+Qualifying Hours = Total Watch Hours - Advertising-Generated Watch Hours
+                   - Organic Shorts Watch Hours.
+Advertising-Generated Watch Hours = Advertising Views × Avg Advertising View Duration.
 """
 from __future__ import annotations
 
 import io
 import random
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -28,6 +29,11 @@ from services.google_ads import GoogleAdsCSVAdapter
 
 _YPP_WATCH_HOURS_THRESHOLD = 3_000
 _BONUS_THRESHOLD = 4_000  # 12-month growth target
+NO_PROMOTION_DATA_MESSAGE = (
+    "No promotion data loaded — all non-Shorts watch hours are counting as "
+    "qualifying. Upload a Promotion CSV in the sidebar to subtract "
+    "promotion-generated hours."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -64,13 +70,14 @@ _PROMO_SLOTS: set[str] = {
 _BASE_DATE = datetime(2025, 7, 1)
 
 
-def _build_demo_metrics() -> list[VideoPromotionMetrics]:
+def _build_demo_metrics(as_of: date | None = None) -> list[VideoPromotionMetrics]:
+    effective_as_of = as_of or date.today()
     rng = random.Random(_DEMO_SEED)
 
     metrics: list[VideoPromotionMetrics] = []
     for i, (vid_id, title, length_sec, campaign, series, playlist) in enumerate(_DEMO_VIDEOS):
         published = _BASE_DATE + timedelta(days=i * 14 + rng.randint(-3, 3))
-        days_live = max((datetime.now() - published).days, 1)
+        days_live = max((effective_as_of - published.date()).days, 1)
 
         has_promo = vid_id in _PROMO_SLOTS
         base_views = rng.randint(3_000, 25_000) + int(days_live * rng.uniform(2, 8))
@@ -128,13 +135,16 @@ def _build_demo_metrics() -> list[VideoPromotionMetrics]:
 # Time-series helper (synthetic cohort rollup for demo mode)
 # ---------------------------------------------------------------------------
 
-def _build_timeseries(metrics: list[VideoPromotionMetrics]) -> pd.DataFrame:
+def _build_timeseries(
+    metrics: list[VideoPromotionMetrics], as_of: date | None = None
+) -> pd.DataFrame:
     """Generate a weekly time-series by distributing each video's hours across its life."""
+    effective_as_of = as_of or date.today()
     rows = []
     for m in metrics:
         if m.published is None:
             continue
-        weeks = max(int((datetime.now() - m.published).days / 7), 1)
+        weeks = max(int((effective_as_of - m.published.date()).days / 7), 1)
         # View velocity decays over time (front-loaded)
         weights = [max(1.0 / (w + 1), 0.02) for w in range(weeks)]
         total_w = sum(weights)
@@ -176,7 +186,35 @@ def _db_query(db_path_str: str, sql: str, params: tuple = ()) -> pd.DataFrame:
             return pd.DataFrame()
 
 
-def _build_real_metrics(db_path: Path, channel: str) -> list[VideoPromotionMetrics]:
+def _cumulative_snapshot_deltas(
+    frame: pd.DataFrame,
+    *,
+    group_columns: list[str],
+    value_columns: list[str],
+    start: date,
+) -> pd.DataFrame:
+    """Convert cumulative snapshots to non-negative increments within a window."""
+    if frame.empty:
+        return frame.copy()
+    result = frame.copy()
+    result["metric_date"] = pd.to_datetime(result["metric_date"])
+    result = result.sort_values(group_columns + ["metric_date"])
+    for column in value_columns:
+        delta = result.groupby(group_columns)[column].diff()
+        # A first snapshot with no pre-window baseline is a lifetime value, not an
+        # increment. Exclude it until a later snapshot supplies an observable delta.
+        delta = delta.fillna(0.0)
+        result[column] = delta.where(delta >= 0, result[column])
+    return result[result["metric_date"] >= pd.Timestamp(start)]
+
+
+def _build_real_metrics(
+    db_path: Path,
+    channel: str,
+    *,
+    as_of: date | None = None,
+    daily_metrics_are_increments: bool = False,
+) -> list[VideoPromotionMetrics]:
     """Build VideoPromotionMetrics from real DB data.
 
     Promotion watch hours come from insightTrafficSourceType=ADVERTISING via
@@ -186,61 +224,73 @@ def _build_real_metrics(db_path: Path, channel: str) -> list[VideoPromotionMetri
     is estimated as promotion_views × average_view_duration / 3600 (data_source='ESTIMATED').
     Follow-on views are tracked separately and never counted as watch hours.
 
-    If no promotion data exists at all, data_source='NONE' and qualifying hours = total hours.
+    If no promotion data exists at all, data_source='NONE' and qualifying hours exclude
+    Shorts but cannot yet exclude advertising-generated watch time.
     """
+    effective_as_of = as_of or date.today()
+    window_start = effective_as_of - timedelta(days=364)
+    window = (channel, window_start.isoformat(), effective_as_of.isoformat())
+
     vids = _db_query(str(db_path),
-        "SELECT video_id, title, published_at, duration_seconds FROM videos WHERE channel = ?",
-        (channel,))
+        "SELECT video_id, title, published_at, duration_seconds FROM videos "
+        "WHERE channel = ? AND (published_at IS NULL OR date(published_at) <= ?)",
+        (channel, effective_as_of.isoformat()))
     if vids.empty:
         return []
 
-    snap = _db_query(str(db_path),
-        "SELECT video_id, view_count FROM video_snapshots WHERE channel = ? ORDER BY captured_at",
-        (channel,))
-    if not snap.empty:
-        snap = snap.groupby("video_id", as_index=False).last()[["video_id", "view_count"]]
-
-    # Latest 90-day total per video (not a sum — each row is already a 90-day aggregate)
-    dvm = _db_query(str(db_path),
-        "SELECT d.video_id, "
-        "d.estimated_minutes_watched/60.0 AS total_watch_hours, "
-        "d.average_view_duration AS avg_view_duration "
-        "FROM daily_video_metrics d "
-        "INNER JOIN ("
-        "  SELECT video_id, MAX(metric_date) AS latest_date "
-        "  FROM daily_video_metrics WHERE channel = ? GROUP BY video_id"
-        ") latest ON d.video_id = latest.video_id "
-        "AND d.metric_date = latest.latest_date "
-        "WHERE d.channel = ?",
-        (channel, channel))
-
-    # ADVERTISING traffic source watch hours per video (API_ACTUAL)
-    adv = _db_query(str(db_path),
-        "SELECT d.video_id, "
-        "d.estimated_minutes_watched/60.0 AS advertising_watch_hours, "
-        "d.views AS advertising_views, "
-        "d.average_view_duration AS avg_advertising_view_duration "
-        "FROM video_traffic_source_metrics d "
-        "INNER JOIN ("
-        "  SELECT video_id, MAX(metric_date) AS latest_date "
-        "  FROM video_traffic_source_metrics "
-        "  WHERE traffic_source_type = 'ADVERTISING' AND channel = ? "
-        "  GROUP BY video_id"
-        ") latest ON d.video_id = latest.video_id "
-        "AND d.metric_date = latest.latest_date "
-        "WHERE d.traffic_source_type = 'ADVERTISING' AND d.channel = ?",
-        (channel, channel))
-
-    df = vids.copy()
-    if not snap.empty:
-        df = df.merge(snap, on="video_id", how="left")
+    if daily_metrics_are_increments:
+        dvm = _db_query(str(db_path),
+            "SELECT video_id, COALESCE(SUM(views), 0) AS view_count, "
+            "COALESCE(SUM(estimated_minutes_watched), 0)/60.0 AS total_watch_hours, "
+            "COALESCE(SUM(average_view_duration * views) / NULLIF(SUM(views), 0), 0) "
+            "AS avg_view_duration FROM daily_video_metrics "
+            "WHERE channel = ? AND metric_date BETWEEN ? AND ? GROUP BY video_id",
+            window)
+        adv = _db_query(str(db_path),
+            "SELECT video_id, COALESCE(SUM(estimated_minutes_watched), 0)/60.0 "
+            "AS advertising_watch_hours, COALESCE(SUM(views), 0) AS advertising_views, "
+            "COALESCE(SUM(average_view_duration * views) / NULLIF(SUM(views), 0), 0) "
+            "AS avg_advertising_view_duration FROM video_traffic_source_metrics "
+            "WHERE traffic_source_type = 'ADVERTISING' AND channel = ? "
+            "AND metric_date BETWEEN ? AND ? GROUP BY video_id",
+            window)
     else:
-        df["view_count"] = 0
-    if not dvm.empty:
-        df = df.merge(dvm, on="video_id", how="left")
-    else:
-        df["total_watch_hours"] = 0.0
-        df["avg_view_duration"] = 0.0
+        # Production rows are cumulative snapshots. Select exactly the latest row at
+        # or before the cutoff for each video; summing snapshots double-counts history.
+        dvm = _db_query(str(db_path),
+            "SELECT d.video_id, d.views AS view_count, "
+            "d.estimated_minutes_watched/60.0 AS total_watch_hours, "
+            "d.average_view_duration AS avg_view_duration FROM daily_video_metrics d "
+            "JOIN (SELECT video_id, MAX(metric_date) metric_date "
+            "FROM daily_video_metrics WHERE channel=? AND metric_date<=? GROUP BY video_id) latest "
+            "ON latest.video_id=d.video_id AND latest.metric_date=d.metric_date "
+            "WHERE d.channel=?",
+            (channel, effective_as_of.isoformat(), channel))
+        adv = _db_query(str(db_path),
+            "SELECT d.video_id, d.estimated_minutes_watched/60.0 AS advertising_watch_hours, "
+            "d.views AS advertising_views, d.average_view_duration AS avg_advertising_view_duration "
+            "FROM video_traffic_source_metrics d JOIN (SELECT video_id, MAX(metric_date) metric_date "
+            "FROM video_traffic_source_metrics WHERE channel=? AND traffic_source_type='ADVERTISING' "
+            "AND metric_date<=? GROUP BY video_id) latest ON latest.video_id=d.video_id "
+            "AND latest.metric_date=d.metric_date WHERE d.channel=? "
+            "AND d.traffic_source_type='ADVERTISING'",
+            (channel, effective_as_of.isoformat(), channel))
+        snapshots = _db_query(str(db_path),
+            "SELECT s.video_id, s.view_count FROM video_snapshots s JOIN ("
+            "SELECT video_id, MAX(captured_at) captured_at FROM video_snapshots "
+            "WHERE channel=? AND date(captured_at)<=? GROUP BY video_id) latest "
+            "ON latest.video_id=s.video_id AND latest.captured_at=s.captured_at "
+            "WHERE s.channel=?",
+            (channel, effective_as_of.isoformat(), channel))
+        if not snapshots.empty and not dvm.empty:
+            dvm = dvm.drop(columns=["view_count"]).merge(
+                snapshots, on="video_id", how="left"
+            )
+
+    if dvm.empty:
+        return []
+
+    df = vids.merge(dvm, on="video_id", how="inner")
     if not adv.empty:
         df = df.merge(adv, on="video_id", how="left")
     else:
@@ -299,8 +349,8 @@ def _build_real_metrics(db_path: Path, channel: str) -> list[VideoPromotionMetri
             # Pass pre-computed promo watch hours directly via the factory
         ))
 
-    # Post-process: override promotion_watch_hours with API_ACTUAL values
-    # (make_metrics recomputes from avg_promotion_view_duration; we need exact API hours)
+    # Override promotion watch hours with the stored value and exclude Shorts from
+    # monetization-qualifying hours while retaining them in organic watch hours.
     corrected: list[VideoPromotionMetrics] = []
     for m, (_, row) in zip(metrics, df.iterrows()):
         if m.data_source == "API_ACTUAL" and pd.notna(row.get("advertising_watch_hours")):
@@ -308,11 +358,12 @@ def _build_real_metrics(db_path: Path, channel: str) -> list[VideoPromotionMetri
             adv_wh = float(row["advertising_watch_hours"])
             organic_wh = max(m.total_watch_hours - adv_wh, 0.0)
             promo_pct = (adv_wh / max(m.total_watch_hours, 1)) * 100
+            qualifying_wh = 0.0 if 0 < m.length_seconds <= 180 else organic_wh
             corrected.append(_dc.replace(
                 m,
                 promotion_watch_hours=adv_wh,
                 organic_watch_hours=organic_wh,
-                estimated_qualifying_hours=organic_wh,
+                estimated_qualifying_hours=qualifying_wh,
                 promotion_percentage=promo_pct,
                 promotion_views=int(row.get("advertising_views") or 0),
             ))
@@ -322,65 +373,130 @@ def _build_real_metrics(db_path: Path, channel: str) -> list[VideoPromotionMetri
     return compute_efficiency_scores(corrected)
 
 
-def _build_real_timeseries(db_path: Path, channel: str) -> pd.DataFrame:
+def _build_real_timeseries(
+    db_path: Path,
+    channel: str,
+    *,
+    as_of: date | None = None,
+    daily_metrics_are_increments: bool = False,
+) -> pd.DataFrame:
     """Aggregate real daily_channel_metrics into weekly time-series.
 
     Splits each week's total hours into organic vs promotion using the channel-level
-    ADVERTISING ratio from video_traffic_source_metrics (latest per-video snapshot).
+    ADVERTISING ratio summed over the same daily-increment window.
     """
+    effective_as_of = as_of or date.today()
+    window_start = effective_as_of - timedelta(days=364)
+    window = (channel, window_start.isoformat(), effective_as_of.isoformat())
     df = _db_query(str(db_path),
         "SELECT metric_date, estimated_minutes_watched "
-        "FROM daily_channel_metrics WHERE channel = ? ORDER BY metric_date",
-        (channel,))
+        "FROM daily_channel_metrics WHERE channel = ? AND metric_date BETWEEN ? AND ? "
+        "ORDER BY metric_date",
+        window)
     if df.empty:
         return pd.DataFrame()
 
-    # Compute ADVERTISING ratio from per-video data
-    total_row = _db_query(str(db_path),
-        "SELECT SUM(d.estimated_minutes_watched/60.0) AS total_wh "
-        "FROM daily_video_metrics d "
-        "INNER JOIN (SELECT video_id, MAX(metric_date) AS latest_date "
-        "FROM daily_video_metrics WHERE channel = ? GROUP BY video_id) latest "
-        "ON d.video_id=latest.video_id AND d.metric_date=latest.latest_date "
-        "WHERE d.channel = ?",
-        (channel, channel))
-    adv_row = _db_query(str(db_path),
-        "SELECT SUM(d.estimated_minutes_watched/60.0) AS adv_wh "
-        "FROM video_traffic_source_metrics d "
-        "INNER JOIN (SELECT video_id, MAX(metric_date) AS latest_date "
-        "FROM video_traffic_source_metrics WHERE traffic_source_type='ADVERTISING' AND channel = ? "
-        "GROUP BY video_id) latest "
-        "ON d.video_id=latest.video_id AND d.metric_date=latest.latest_date "
-        "WHERE d.traffic_source_type='ADVERTISING' AND d.channel = ?",
-        (channel, channel))
-    total_wh = float(total_row["total_wh"].iloc[0] or 0) if not total_row.empty else 0.0
-    adv_wh = float(adv_row["adv_wh"].iloc[0] or 0) if not adv_row.empty else 0.0
-    promo_ratio = adv_wh / max(total_wh, 1.0)
-    qual_ratio = 1.0 - promo_ratio
-
     df["metric_date"] = pd.to_datetime(df["metric_date"])
+    adv = _db_query(str(db_path),
+        "SELECT metric_date, video_id, estimated_minutes_watched FROM "
+        "video_traffic_source_metrics WHERE channel=? AND traffic_source_type='ADVERTISING' "
+        "AND metric_date<=? ORDER BY video_id, metric_date",
+        (channel, effective_as_of.isoformat()))
+    shorts = _db_query(str(db_path),
+        "SELECT d.metric_date, d.video_id, d.estimated_minutes_watched "
+        "FROM daily_video_metrics d JOIN videos v ON v.channel=d.channel AND v.video_id=d.video_id "
+        "WHERE d.channel=? AND d.metric_date<=? AND v.duration_seconds>0 "
+        "AND v.duration_seconds<=180 ORDER BY d.video_id, d.metric_date",
+        (channel, effective_as_of.isoformat()))
+    short_adv = _db_query(str(db_path),
+        "SELECT d.metric_date, d.video_id, d.estimated_minutes_watched "
+        "FROM video_traffic_source_metrics d JOIN videos v "
+        "ON v.channel=d.channel AND v.video_id=d.video_id WHERE d.channel=? "
+        "AND d.metric_date<=? AND d.traffic_source_type='ADVERTISING' "
+        "AND v.duration_seconds>0 AND v.duration_seconds<=180 "
+        "ORDER BY d.video_id, d.metric_date",
+        (channel, effective_as_of.isoformat()))
+
+    if not daily_metrics_are_increments:
+        adv = _cumulative_snapshot_deltas(
+            adv,
+            group_columns=["video_id"],
+            value_columns=["estimated_minutes_watched"],
+            start=window_start,
+        )
+        shorts = _cumulative_snapshot_deltas(
+            shorts,
+            group_columns=["video_id"],
+            value_columns=["estimated_minutes_watched"],
+            start=window_start,
+        )
+        short_adv = _cumulative_snapshot_deltas(
+            short_adv,
+            group_columns=["video_id"],
+            value_columns=["estimated_minutes_watched"],
+            start=window_start,
+        )
+    else:
+        for frame in (adv, shorts, short_adv):
+            if not frame.empty:
+                frame["metric_date"] = pd.to_datetime(frame["metric_date"])
+                frame.drop(
+                    frame[frame["metric_date"] < pd.Timestamp(window_start)].index,
+                    inplace=True,
+                )
+
+    def _daily_minutes(frame: pd.DataFrame, name: str) -> pd.DataFrame:
+        if frame.empty:
+            return pd.DataFrame(columns=["metric_date", name])
+        return frame.groupby("metric_date", as_index=False)["estimated_minutes_watched"].sum().rename(
+            columns={"estimated_minutes_watched": name}
+        )
+
+    df = df.merge(_daily_minutes(adv, "promotion_minutes"), on="metric_date", how="left")
+    df = df.merge(_daily_minutes(shorts, "shorts_minutes"), on="metric_date", how="left")
+    df = df.merge(_daily_minutes(short_adv, "shorts_promotion_minutes"), on="metric_date", how="left")
+    for column in ("promotion_minutes", "shorts_minutes", "shorts_promotion_minutes"):
+        df[column] = df[column].fillna(0.0)
+    df["total_hours"] = df["estimated_minutes_watched"] / 60.0
+    df["promotion_hours"] = df["promotion_minutes"].clip(lower=0) / 60.0
+    df["organic_hours"] = (df["total_hours"] - df["promotion_hours"]).clip(lower=0)
+    df["shorts_organic_hours"] = (
+        df["shorts_minutes"] - df["shorts_promotion_minutes"]
+    ).clip(lower=0) / 60.0
+    df["qualifying_hours"] = (
+        df["organic_hours"] - df["shorts_organic_hours"]
+    ).clip(lower=0)
     df["week"] = df["metric_date"].dt.to_period("W").apply(lambda p: p.start_time.date())
-    weekly = df.groupby("week")["estimated_minutes_watched"].sum().reset_index()
-    weekly["total_hours"] = weekly["estimated_minutes_watched"] / 60
-    weekly["promotion_hours"] = weekly["total_hours"] * promo_ratio
-    weekly["organic_hours"] = weekly["total_hours"] * qual_ratio
-    weekly["qualifying_hours"] = weekly["organic_hours"]
+    weekly = df.groupby("week", as_index=False).agg(
+        organic_hours=("organic_hours", "sum"),
+        promotion_hours=("promotion_hours", "sum"),
+        qualifying_hours=("qualifying_hours", "sum"),
+    )
     return weekly[["week", "organic_hours", "promotion_hours", "qualifying_hours"]]
 
 
-def _get_qualifying_hours_last_365(db_path: Path, channel: str) -> float:
-    cutoff = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
+def _get_qualifying_hours_last_365(
+    db_path: Path, channel: str, *, as_of: date | None = None
+) -> float:
+    effective_as_of = as_of or date.today()
+    cutoff = (effective_as_of - timedelta(days=364)).isoformat()
     df = _db_query(str(db_path),
         "SELECT SUM(estimated_minutes_watched)/60.0 AS hrs "
-        "FROM daily_channel_metrics WHERE metric_date >= ? AND channel = ?",
-        (cutoff, channel))
+        "FROM daily_channel_metrics WHERE metric_date BETWEEN ? AND ? AND channel = ?",
+        (cutoff, effective_as_of.isoformat(), channel))
     if df.empty or pd.isna(df["hrs"].iloc[0]):
         return 0.0
     return float(df["hrs"].iloc[0])
 
 
-def _get_shorts_watch_hours(db_path: Path, channel: str) -> float:
-    """Sum the latest per-video *non-ADVERTISING* watch hours for videos <=180s (Shorts).
+def _get_shorts_watch_hours(
+    db_path: Path,
+    channel: str,
+    *,
+    as_of: date | None = None,
+    daily_metrics_are_increments: bool = False,
+) -> float:
+    """Return non-advertising Shorts hours for the trailing-year window.
 
     Shorts watch time never counts toward the YPP watch-hours requirement, regardless
     of whether it was organic or promoted — but a Short's ADVERTISING-sourced hours are
@@ -389,64 +505,89 @@ def _get_shorts_watch_hours(db_path: Path, channel: str) -> float:
     ran paid promotion, so this returns only each Short's non-ADVERTISING remainder
     (total minus that video's own ADVERTISING hours, floored at 0).
 
-    Uses each video's most recent daily_video_metrics / video_traffic_source_metrics
-    snapshot (lifetime-to-date cumulative figures), so this is a lifetime Shorts total
-    rather than a strict last-365-days figure — acceptable while the channel is younger
-    than 365 days (see _get_qualifying_hours_last_365).
+    Increment storage is summed directly; cumulative storage is converted to deltas.
+    Both totals use the same explicit inclusive reporting window.
     """
-    df = _db_query(str(db_path),
-        "SELECT SUM(MAX(d.estimated_minutes_watched/60.0 - COALESCE(adv.adv_wh, 0), 0)) AS shorts_hrs "
-        "FROM daily_video_metrics d "
-        "INNER JOIN videos v ON v.channel = d.channel AND v.video_id = d.video_id "
-        "INNER JOIN ("
-        "  SELECT video_id, MAX(metric_date) AS latest_date "
-        "  FROM daily_video_metrics WHERE channel = ? GROUP BY video_id"
-        ") latest ON d.video_id = latest.video_id AND d.metric_date = latest.latest_date "
-        "LEFT JOIN ("
-        "  SELECT t.video_id, t.estimated_minutes_watched/60.0 AS adv_wh "
-        "  FROM video_traffic_source_metrics t "
-        "  INNER JOIN ("
-        "    SELECT video_id, MAX(metric_date) AS latest_date "
-        "    FROM video_traffic_source_metrics "
-        "    WHERE traffic_source_type = 'ADVERTISING' AND channel = ? GROUP BY video_id"
-        "  ) latest_adv ON t.video_id = latest_adv.video_id AND t.metric_date = latest_adv.latest_date "
-        "  WHERE t.traffic_source_type = 'ADVERTISING' AND t.channel = ?"
-        ") adv ON adv.video_id = d.video_id "
-        "WHERE d.channel = ? AND v.duration_seconds > 0 AND v.duration_seconds <= 180",
-        (channel, channel, channel, channel))
-    if df.empty or pd.isna(df["shorts_hrs"].iloc[0]):
-        return 0.0
-    return float(df["shorts_hrs"].iloc[0])
+    effective_as_of = as_of or date.today()
+    cutoff = (effective_as_of - timedelta(days=364)).isoformat()
+    totals = _db_query(str(db_path),
+        "SELECT d.metric_date, d.video_id, d.estimated_minutes_watched "
+        "FROM daily_video_metrics d JOIN videos v ON v.channel=d.channel "
+        "AND v.video_id=d.video_id WHERE d.channel=? AND d.metric_date<=? "
+        "AND v.duration_seconds>0 AND v.duration_seconds<=180 "
+        "ORDER BY d.video_id, d.metric_date",
+        (channel, effective_as_of.isoformat()))
+    adv = _db_query(str(db_path),
+        "SELECT d.metric_date, d.video_id, d.estimated_minutes_watched "
+        "FROM video_traffic_source_metrics d JOIN videos v ON v.channel=d.channel "
+        "AND v.video_id=d.video_id WHERE d.channel=? AND d.metric_date<=? "
+        "AND d.traffic_source_type='ADVERTISING' AND v.duration_seconds>0 "
+        "AND v.duration_seconds<=180 ORDER BY d.video_id, d.metric_date",
+        (channel, effective_as_of.isoformat()))
+    if not daily_metrics_are_increments:
+        totals = _cumulative_snapshot_deltas(
+            totals,
+            group_columns=["video_id"],
+            value_columns=["estimated_minutes_watched"],
+            start=effective_as_of - timedelta(days=364),
+        )
+        adv = _cumulative_snapshot_deltas(
+            adv,
+            group_columns=["video_id"],
+            value_columns=["estimated_minutes_watched"],
+            start=effective_as_of - timedelta(days=364),
+        )
+    else:
+        totals = totals[totals["metric_date"] >= cutoff] if not totals.empty else totals
+        adv = adv[adv["metric_date"] >= cutoff] if not adv.empty else adv
+    total_minutes = float(totals["estimated_minutes_watched"].sum()) if not totals.empty else 0.0
+    adv_minutes = float(adv["estimated_minutes_watched"].sum()) if not adv.empty else 0.0
+    return max(total_minutes - adv_minutes, 0.0) / 60.0
 
 
-def _get_advertising_watch_hours(db_path: Path, channel: str) -> tuple[float, bool]:
+def _get_advertising_watch_hours(
+    db_path: Path,
+    channel: str,
+    *,
+    as_of: date | None = None,
+    daily_metrics_are_increments: bool = False,
+) -> tuple[float, bool]:
     """Return (advertising_watch_hours, has_api_data).
 
-    Sums the latest ADVERTISING-source estimated_minutes_watched per video.
+    Sums ADVERTISING watch time over the trailing year. Increment storage is summed
+    directly; cumulative storage is converted to deltas.
     Returns (0.0, False) when video_traffic_source_metrics has no ADVERTISING rows.
     """
+    effective_as_of = as_of or date.today()
+    cutoff = (effective_as_of - timedelta(days=364)).isoformat()
     df = _db_query(str(db_path),
-        "SELECT SUM(d.estimated_minutes_watched)/60.0 AS adv_hrs "
-        "FROM video_traffic_source_metrics d "
-        "INNER JOIN ("
-        "  SELECT video_id, MAX(metric_date) AS latest_date "
-        "  FROM video_traffic_source_metrics "
-        "  WHERE traffic_source_type = 'ADVERTISING' AND channel = ? "
-        "  GROUP BY video_id"
-        ") latest ON d.video_id = latest.video_id "
-        "AND d.metric_date = latest.latest_date "
-        "WHERE d.traffic_source_type = 'ADVERTISING' AND d.channel = ?",
-        (channel, channel))
-    if df.empty or pd.isna(df["adv_hrs"].iloc[0]):
+        "SELECT metric_date, video_id, estimated_minutes_watched "
+        "FROM video_traffic_source_metrics WHERE traffic_source_type='ADVERTISING' "
+        "AND channel=? AND metric_date<=? ORDER BY video_id, metric_date",
+        (channel, effective_as_of.isoformat()))
+    if df.empty:
         return 0.0, False
-    return float(df["adv_hrs"].iloc[0]), True
+    if daily_metrics_are_increments:
+        df = df[df["metric_date"] >= cutoff]
+    else:
+        df = _cumulative_snapshot_deltas(
+            df,
+            group_columns=["video_id"],
+            value_columns=["estimated_minutes_watched"],
+            start=effective_as_of - timedelta(days=364),
+        )
+    return float(df["estimated_minutes_watched"].sum()) / 60.0, True
 
 
-def _get_db_date_range(db_path: Path, channel: str) -> tuple[Optional[str], Optional[str]]:
+def _get_db_date_range(
+    db_path: Path, channel: str, *, as_of: date | None = None
+) -> tuple[Optional[str], Optional[str]]:
+    effective_as_of = as_of or date.today()
+    cutoff = (effective_as_of - timedelta(days=364)).isoformat()
     df = _db_query(str(db_path),
         "SELECT MIN(metric_date) AS earliest, MAX(metric_date) AS latest "
-        "FROM daily_channel_metrics WHERE channel = ?",
-        (channel,))
+        "FROM daily_channel_metrics WHERE channel = ? AND metric_date BETWEEN ? AND ?",
+        (channel, cutoff, effective_as_of.isoformat()))
     if df.empty or pd.isna(df["earliest"].iloc[0]):
         return None, None
     return str(df["earliest"].iloc[0]), str(df["latest"].iloc[0])
@@ -469,12 +610,13 @@ def _to_df(metrics: list[VideoPromotionMetrics]) -> pd.DataFrame:
             "Promotion Views": m.promotion_views,
             "Total Watch Hours": round(m.total_watch_hours, 1),
             "Promotion Watch Hours": round(m.promotion_watch_hours, 1),
+            "Organic Watch Hours": round(m.organic_watch_hours, 1),
             "Est. Qualifying Hours": round(m.estimated_qualifying_hours, 1),
             "Promotion %": round(m.promotion_percentage, 1),
             "Subscribers": m.subscribers,
             "Follow-on Views": m.follow_on_views,
             "Promotion Cost": round(m.promotion_cost, 2),
-            "Cost / Organic Hour": round(m.cost_per_qualified_hour, 2),
+            "Cost / Qualifying Hour": round(m.cost_per_qualified_hour, 2),
             "Cost / Subscriber": round(m.cost_per_subscriber, 2),
             "Cost / Follow-on View": round(m.cost_per_follow_on_view, 2),
             "CTR %": round(m.ctr, 2),
@@ -656,7 +798,7 @@ def _chart_scatter_cost_vs_hours(df: pd.DataFrame) -> None:
         color="Efficiency Score",
         color_continuous_scale="RdYlGn",
         hover_name="Video",
-        hover_data=["Promotion %", "Cost / Organic Hour"],
+        hover_data=["Promotion %", "Cost / Qualifying Hour"],
         labels={
             "Promotion Cost": "Promotion Cost ($)",
             "Est. Qualifying Hours": "Est. Qualifying Hours",
@@ -683,10 +825,10 @@ def _chart_bubble(df: pd.DataFrame) -> None:
         size_max=60,
         labels={
             "Promotion Cost": "Promotion Cost ($)",
-            "Est. Qualifying Hours": "Organic Watch Hours",
+            "Est. Qualifying Hours": "Qualifying Watch Hours",
             "Follow-on Views": "Bubble = Follow-on Views",
         },
-        title="Promotion Cost · Organic Hours · Subscribers (Bubble = Follow-on Views)",
+        title="Promotion Cost · Qualifying Hours · Subscribers (Bubble = Follow-on Views)",
     )
     fig.update_layout(height=440)
     st.plotly_chart(fig, use_container_width=True)
@@ -711,20 +853,20 @@ def _chart_top25_qualifying(df: pd.DataFrame) -> None:
 
 
 def _chart_worst_promotions(df: pd.DataFrame) -> None:
-    promo = df[(df["Promotion Cost"] > 0) & (df["Cost / Organic Hour"] > 0)].copy()
+    promo = df[(df["Promotion Cost"] > 0) & (df["Cost / Qualifying Hour"] > 0)].copy()
     if promo.empty:
         st.info("No promoted videos with cost data in current filter.")
         return
-    worst = promo.nlargest(15, "Cost / Organic Hour")[["Video", "Cost / Organic Hour", "Promotion Cost", "Est. Qualifying Hours"]].copy()
+    worst = promo.nlargest(15, "Cost / Qualifying Hour")[["Video", "Cost / Qualifying Hour", "Promotion Cost", "Est. Qualifying Hours"]].copy()
     worst["short_title"] = worst["Video"].apply(lambda t: t[:50] + "…" if len(t) > 50 else t)
     fig = px.bar(
         worst,
-        x="Cost / Organic Hour",
+        x="Cost / Qualifying Hour",
         y="short_title",
         orientation="h",
-        color="Cost / Organic Hour",
+        color="Cost / Qualifying Hour",
         color_continuous_scale="Reds",
-        labels={"short_title": "", "Cost / Organic Hour": "Cost per Qualifying Hour ($)"},
+        labels={"short_title": "", "Cost / Qualifying Hour": "Cost per Qualifying Hour ($)"},
         title="Worst Promotions: Highest Cost per Qualifying Hour",
     )
     fig.update_yaxes(autorange="reversed")
@@ -781,37 +923,44 @@ def _render_promotion_impact(metrics: list[VideoPromotionMetrics]) -> None:
 # Projections
 # ---------------------------------------------------------------------------
 
-def _render_projections(db_path: Path, qual_ratio: float, channel: str) -> None:
+def _render_projections(
+    db_path: Path,
+    qual_ratio: float,
+    channel: str,
+    *,
+    as_of: date | None = None,
+) -> None:
     """Show projected qualifying hours under three rate scenarios."""
     import datetime as _dt
     import numpy as np
 
-    today = _dt.date.today()
+    today = as_of or _dt.date.today()
 
     # Current cumulative qualifying hours over the trailing 365 days — matches YPP's
     # actual rolling-window rule. While the channel is younger than 365 days this equals
     # its full history; once it passes the 1-year mark, an unbounded SUM would keep
     # counting hours YouTube has already rolled off the eligibility window.
-    year_cutoff = (today - _dt.timedelta(days=365)).isoformat()
+    year_cutoff = (today - _dt.timedelta(days=364)).isoformat()
     cur_row = _db_query(str(db_path),
         "SELECT SUM(estimated_minutes_watched)/60.0 AS hrs, "
-        "COUNT(*) AS days FROM daily_channel_metrics WHERE channel = ? AND metric_date >= ?",
-        (channel, year_cutoff))
+        "COUNT(*) AS days FROM daily_channel_metrics WHERE channel = ? "
+        "AND metric_date BETWEEN ? AND ?",
+        (channel, year_cutoff, today.isoformat()))
     current_total = float(cur_row["hrs"].iloc[0] or 0) if not cur_row.empty else 0.0
     channel_days = int(cur_row["days"].iloc[0] or 1) if not cur_row.empty else 1
     current_qualifying = current_total * qual_ratio
 
     def _avg_rate(lookback_days: int) -> float:
-        cutoff = (today - _dt.timedelta(days=lookback_days)).isoformat()
+        cutoff = (today - _dt.timedelta(days=lookback_days - 1)).isoformat()
         r = _db_query(str(db_path),
             "SELECT AVG(estimated_minutes_watched)/60.0 AS d "
-            "FROM daily_channel_metrics WHERE metric_date >= ? AND channel = ?",
-            (cutoff, channel))
+            "FROM daily_channel_metrics WHERE metric_date BETWEEN ? AND ? AND channel = ?",
+            (cutoff, today.isoformat(), channel))
         return float(r["d"].iloc[0] or 0) if not r.empty else 0.0
 
     rate_30d = _avg_rate(30) * qual_ratio    # recent (last 30 days)
     rate_90d = _avg_rate(90) * qual_ratio    # medium-term (last 90 days)
-    rate_life = (current_total / max(channel_days, 1)) * qual_ratio  # lifetime avg
+    rate_life = (current_total / max(channel_days, 1)) * qual_ratio  # trailing-year avg
 
     if rate_life <= 0:
         st.info("Not enough history to project qualifying hours.")
@@ -822,11 +971,11 @@ def _render_projections(db_path: Path, qual_ratio: float, channel: str) -> None:
     # Rate comparison table
     rc1, rc2, rc3 = st.columns(3)
     rc1.metric(
-        "Conservative (Lifetime Avg)",
+        "Conservative (Trailing-Year Avg)",
         f"{rate_life:.1f} qualifying hrs/day",
         delta=f"{rate_life * 30:.0f} hrs / month",
         delta_color="off",
-        help=f"Based on all {channel_days} days of channel history. "
+        help=f"Based on {channel_days} days in the trailing-year window. "
              "Best estimate if growth has plateaued.",
     )
     rc2.metric(
@@ -850,7 +999,7 @@ def _render_projections(db_path: Path, qual_ratio: float, channel: str) -> None:
         accel_pct = (rate_30d / rate_life - 1) * 100
         st.info(
             f"Your recent rate ({rate_30d:.1f} qualifying hrs/day) is **{accel_pct:.0f}% faster** "
-            f"than your lifetime average ({rate_life:.1f} hrs/day). This likely reflects a mix of "
+            f"than your trailing-year average ({rate_life:.1f} hrs/day). This likely reflects a mix of "
             f"subscriber growth (more organic reach per video), recent promotion spend, "
             f"and natural channel momentum. The Conservative line accounts for the possibility "
             f"that some of this acceleration is temporary.",
@@ -907,7 +1056,7 @@ def _render_projections(db_path: Path, qual_ratio: float, channel: str) -> None:
 
     fig = go.Figure()
     scenarios = [
-        ("Conservative (Lifetime)", rate_life, "#F58518", "dash"),
+        ("Conservative (Trailing Year)", rate_life, "#F58518", "dash"),
         ("Moderate (90-day)", rate_90d, "#4C78A8", "dot"),
         ("Optimistic (30-day)", rate_30d, "#54A24B", "solid"),
     ]
@@ -956,53 +1105,83 @@ def _render_projections(db_path: Path, qual_ratio: float, channel: str) -> None:
 # Main render function
 # ---------------------------------------------------------------------------
 
-def render(db_path: Path, channel: str) -> None:
+def render(
+    db_path: Path,
+    channel: str,
+    as_of: date | None = None,
+    empty_message: str | None = None,
+    *,
+    fixed_data_source: bool = False,
+    daily_metrics_are_increments: bool = False,
+) -> None:
+    effective_as_of = as_of or date.today()
+    empty_copy = empty_message or "No qualifying watch-hour data is available."
     st.header("Qualifying Watch Hours")
     st.caption(
-        "Estimates YouTube Partner Program qualifying watch hours by removing "
-        "promotion-generated watch time from total watch time."
+        "Estimates YouTube Partner Program qualifying watch hours by excluding "
+        "advertising-generated watch time and watch time from Shorts."
     )
 
     # --- Sidebar: data source & filters ---
-    real_metrics = _build_real_metrics(db_path, channel)
+    real_metrics = _build_real_metrics(
+        db_path,
+        channel,
+        as_of=effective_as_of,
+        daily_metrics_are_increments=daily_metrics_are_increments,
+    )
     has_real_data = len(real_metrics) > 0
 
-    with st.sidebar:
-        st.markdown("---")
-        st.markdown("**Data Source**")
-        default_source = "Live Data" if has_real_data else "Demo Mode"
-        source_mode = st.radio(
-            "data_source",
-            ["Live Data", "Demo Mode", "Upload Promotion CSV"],
-            index=["Live Data", "Demo Mode", "Upload Promotion CSV"].index(default_source),
-            label_visibility="collapsed",
-            key="qwh_source",
-        )
-
-        uploaded_file = None
-        if source_mode == "Upload Promotion CSV":
-            uploaded_file = st.file_uploader(
-                "Promotion CSV",
-                type=["csv"],
-                key="qwh_csv",
-                help="Expected columns: video_id, campaign, cost_usd, views (paid). See services/google_ads.py for full schema.",
+    uploaded_file = None
+    if fixed_data_source:
+        source_mode = "Live Data"
+        if not has_real_data:
+            st.warning(empty_copy)
+            return
+    else:
+        with st.sidebar:
+            st.markdown("---")
+            st.markdown("**Data Source**")
+            default_source = "Live Data" if has_real_data else "Demo Mode"
+            source_mode = st.radio(
+                "data_source",
+                ["Live Data", "Demo Mode", "Upload Promotion CSV"],
+                index=["Live Data", "Demo Mode", "Upload Promotion CSV"].index(default_source),
+                label_visibility="collapsed",
+                key="qwh_source",
             )
-
-        st.markdown("---")
-        st.markdown("**Filters**")
+            if source_mode == "Upload Promotion CSV":
+                uploaded_file = st.file_uploader(
+                    "Promotion CSV",
+                    type=["csv"],
+                    key="qwh_csv",
+                    help="Expected columns: video_id, campaign, cost_usd, views (paid). See services/google_ads.py for full schema.",
+                )
+            st.markdown("---")
+            st.markdown("**Filters**")
 
     # --- Load base metrics ---
     if source_mode == "Live Data":
         base_metrics = real_metrics
-        ts = _build_real_timeseries(db_path, channel)
+        ts = _build_real_timeseries(
+            db_path,
+            channel,
+            as_of=effective_as_of,
+            daily_metrics_are_increments=daily_metrics_are_increments,
+        )
         is_demo = False
     elif source_mode == "Upload Promotion CSV" and uploaded_file is not None:
-        base_metrics = _try_load_csv(uploaded_file) or real_metrics or _build_demo_metrics()
-        ts = _build_real_timeseries(db_path, channel) if has_real_data else _build_timeseries(base_metrics)
+        base_metrics = _try_load_csv(uploaded_file) or real_metrics or _build_demo_metrics(effective_as_of)
+        ts = (_build_real_timeseries(
+                  db_path,
+                  channel,
+                  as_of=effective_as_of,
+                  daily_metrics_are_increments=daily_metrics_are_increments,
+              )
+              if has_real_data else _build_timeseries(base_metrics, effective_as_of))
         is_demo = False
     else:
-        base_metrics = _build_demo_metrics()
-        ts = _build_timeseries(base_metrics)
+        base_metrics = _build_demo_metrics(effective_as_of)
+        ts = _build_timeseries(base_metrics, effective_as_of)
         is_demo = True
 
     if is_demo:
@@ -1012,19 +1191,34 @@ def render(db_path: Path, channel: str) -> None:
             icon="🧪",
         )
     elif not has_real_data:
-        st.info("No data in database yet. Run `python fetch_metrics.py` to populate.")
+        st.info(empty_copy)
 
     # --- YPP progress (live data only) ---
     if source_mode == "Live Data" and has_real_data:
-        total_365 = _get_qualifying_hours_last_365(db_path, channel)
-        adv_hours, has_adv_data = _get_advertising_watch_hours(db_path, channel)
-        shorts_hours = _get_shorts_watch_hours(db_path, channel)
-        earliest, latest = _get_db_date_range(db_path, channel)
+        total_365 = _get_qualifying_hours_last_365(
+            db_path, channel, as_of=effective_as_of
+        )
+        adv_hours, has_adv_data = _get_advertising_watch_hours(
+            db_path,
+            channel,
+            as_of=effective_as_of,
+            daily_metrics_are_increments=daily_metrics_are_increments,
+        )
+        shorts_hours = _get_shorts_watch_hours(
+            db_path,
+            channel,
+            as_of=effective_as_of,
+            daily_metrics_are_increments=daily_metrics_are_increments,
+        )
+        earliest, latest = _get_db_date_range(
+            db_path, channel, as_of=effective_as_of
+        )
         est_qualifying = max(total_365 - adv_hours - shorts_hours, 0.0) if has_adv_data else max(total_365 - shorts_hours, 0.0)
 
         st.subheader("YouTube Partner Program Progress")
 
         if has_adv_data:
+            source_label = "SIMULATED" if fixed_data_source else "API_ACTUAL"
             ypp_col1, ypp_col2, ypp_col3, ypp_col4, ypp_col5 = st.columns(5)
             ypp_col1.metric(
                 "Total Watch Hours",
@@ -1036,16 +1230,16 @@ def render(db_path: Path, channel: str) -> None:
             ypp_col2.metric(
                 "Promotion (ADVERTISING)",
                 f"−{adv_hours:,.0f} hrs",
-                delta="API_ACTUAL",
+                delta=source_label,
                 delta_color="off",
                 help="Sum of insightTrafficSourceType=ADVERTISING minutes watched / 60 "
-                     "across all videos, lifetime-to-date. These hours do not count toward YPP.",
+                     "across all videos in the trailing 365-day window. These hours do not count toward YPP.",
             )
             ypp_col3.metric(
                 "Shorts (excluded)",
                 f"−{shorts_hours:,.0f} hrs",
                 delta_color="off",
-                help="Watch hours on videos ≤180s, lifetime-to-date. Shorts never count "
+                help="Watch hours on videos ≤180s in the trailing 365-day window. Shorts never count "
                      "toward the YPP watch-hours requirement, promoted or not.",
             )
             ypp_col4.metric(
@@ -1059,11 +1253,17 @@ def render(db_path: Path, channel: str) -> None:
                 help="YouTube Partner Program requires 3,000 valid public watch hours in the last 365 days.",
             )
             st.progress(min(est_qualifying / _YPP_WATCH_HOURS_THRESHOLD, 1.0))
-            st.caption(
-                f"Est. qualifying = {total_365:,.0f} total − {adv_hours:,.0f} ADVERTISING − {shorts_hours:,.0f} Shorts "
-                f"= **{est_qualifying:,.0f} hrs** (API_ACTUAL). Verify in **YouTube Studio → Earn** — YouTube's own "
-                "eligibility figure may still differ (e.g. Content ID claims, reused/duplicate content)."
-            )
+            if fixed_data_source:
+                st.caption(
+                    f"Simulated qualifying = {total_365:,.0f} total − {adv_hours:,.0f} "
+                    f"promotion − {shorts_hours:,.0f} Shorts = **{est_qualifying:,.0f} hrs**."
+                )
+            else:
+                st.caption(
+                    f"Est. qualifying = {total_365:,.0f} total − {adv_hours:,.0f} ADVERTISING − {shorts_hours:,.0f} Shorts "
+                    f"= **{est_qualifying:,.0f} hrs** (API_ACTUAL). Verify in **YouTube Studio → Earn** — YouTube's own "
+                    "eligibility figure may still differ (e.g. Content ID claims, reused/duplicate content)."
+                )
 
             st.markdown("---")
             st.markdown("**12-Month Growth Target: 4,000 hrs**")
@@ -1096,7 +1296,7 @@ def render(db_path: Path, channel: str) -> None:
                 "Shorts (excluded)",
                 f"−{shorts_hours:,.0f} hrs",
                 delta_color="off",
-                help="Watch hours on videos ≤180s, lifetime-to-date. Shorts never count "
+                help="Watch hours on videos ≤180s in the trailing 365-day window. Shorts never count "
                      "toward the YPP watch-hours requirement.",
             )
             ypp_col3.metric(
@@ -1112,16 +1312,22 @@ def render(db_path: Path, channel: str) -> None:
                 help="YouTube Partner Program requires 3,000 valid public watch hours in the last 365 days.",
             )
             st.progress(min(est_qualifying / _YPP_WATCH_HOURS_THRESHOLD, 1.0))
-            st.info(
-                "ADVERTISING watch time data not yet available. "
-                "Run the fetch job to populate `video_traffic_source_metrics` — "
-                "qualifying hours will then also net out promotion watch time.",
-                icon="ℹ",
-            )
-            st.caption(
-                "⚠ Est. qualifying above excludes Shorts but not promotion watch time yet. "
-                "For the exact YPP-eligible count, check **YouTube Studio → Earn**."
-            )
+            if fixed_data_source:
+                st.info(
+                    "The simulated selection contains no promotion watch-time rows.",
+                    icon="ℹ",
+                )
+            else:
+                st.info(
+                    "ADVERTISING watch time data not yet available. "
+                    "Run the fetch job to populate `video_traffic_source_metrics` — "
+                    "qualifying hours will then also net out promotion watch time.",
+                    icon="ℹ",
+                )
+                st.caption(
+                    "⚠ Est. qualifying above excludes Shorts but not promotion watch time yet. "
+                    "For the exact YPP-eligible count, check **YouTube Studio → Earn**."
+                )
 
             st.markdown("---")
             st.markdown("**12-Month Growth Target: 4,000 hrs**")
@@ -1236,7 +1442,7 @@ def render(db_path: Path, channel: str) -> None:
     ov1.metric(
         "Est. Qualifying Hours",
         f"{report.estimated_qualifying_hours:,.1f} hrs",
-        help="Total Watch Hours minus Promotion Watch Hours",
+        help="Organic watch hours minus organic Shorts watch hours",
     )
     ov2.metric(
         "Promotion Watch Hours",
@@ -1247,41 +1453,50 @@ def render(db_path: Path, channel: str) -> None:
     ov3.metric(
         "Total Watch Hours",
         f"{total_watch_hrs:,.1f} hrs",
-        help="Qualifying Hours + Promotion Watch Hours",
+        help="Promotion watch hours plus organic watch hours",
     )
     ov4.metric(
-        "Promotion %",
-        f"{report.promotion_pct:.1f}%",
-        help="Promotion watch hours as % of total",
+        "Organic Watch Hours",
+        f"{report.organic_watch_hours:,.1f} hrs",
+        help="Total watch hours minus promotion watch hours; includes organic Shorts",
     )
     ov5.metric(
         "Avg View Duration",
         _fmt_duration(int(report.avg_organic_view_duration_seconds)),
     )
     ov6.metric(
-        "Est. Hours Lost to Promotion",
-        f"{report.hours_lost_to_promotion:,.1f} hrs",
-        delta=f"${total_cost_per_qual:,.2f} / qualifying hr" if total_cost_per_qual > 0 else "Upload promotion CSV to calculate",
+        "Organic Shorts Excluded",
+        f"{max(report.organic_watch_hours - report.estimated_qualifying_hours, 0):,.1f} hrs",
+        delta=(
+            f"${total_cost_per_qual:,.2f} / qualifying hr"
+            if total_cost_per_qual > 0
+            else (
+                "Cost inputs are not included in this simulation"
+                if fixed_data_source
+                else "Upload promotion CSV to calculate"
+            )
+        ),
         delta_color="off",
     )
 
     if source_mode == "Live Data" and report.promotion_watch_hours == 0:
         st.info(
-            "No promotion data loaded — all watch hours are counting as qualifying. "
-            "Upload a Promotion CSV in the sidebar to subtract promotion-generated hours.",
+            (
+                "The simulated dataset contains no promotion watch time for this selection."
+                if fixed_data_source
+                else NO_PROMOTION_DATA_MESSAGE
+            ),
             icon="ℹ️",
         )
 
     # --- Projections (live data only) ---
     if source_mode == "Live Data" and has_real_data and total_watch_hrs > 0:
-        _qual_ratio_proj = report.estimated_qualifying_hours / max(total_watch_hrs, 1)
-        # Fold in the Shorts exclusion so this panel's "current qualifying hours" baseline
-        # agrees with the YPP Progress panel above it, which nets out Shorts explicitly.
-        _shorts_hours_proj = _get_shorts_watch_hours(db_path, channel)
-        _total_365_proj = _get_qualifying_hours_last_365(db_path, channel)
-        if _total_365_proj > 0:
-            _qual_ratio_proj *= max(1 - _shorts_hours_proj / _total_365_proj, 0.0)
-        _render_projections(db_path, _qual_ratio_proj, channel)
+        # Use the same trailing-year promotion and Shorts exclusions as the YPP panel,
+        # rather than applying the all-time per-video mix to recent daily rates.
+        _qual_ratio_proj = est_qualifying / max(total_365, 1.0)
+        _render_projections(
+            db_path, _qual_ratio_proj, channel, as_of=effective_as_of
+        )
 
     # --- Charts ---
     st.subheader("Charts")
@@ -1308,9 +1523,10 @@ def render(db_path: Path, channel: str) -> None:
     df = _to_df(metrics)
     display_cols = [
         "Video", "Published", "Length", "Total Views", "Organic Views", "Promotion Views",
-        "Total Watch Hours", "Promotion Watch Hours", "Est. Qualifying Hours",
+        "Total Watch Hours", "Promotion Watch Hours", "Organic Watch Hours",
+        "Est. Qualifying Hours",
         "Promotion %", "Subscribers", "Follow-on Views",
-        "Promotion Cost", "Cost / Organic Hour", "Cost / Subscriber", "Cost / Follow-on View",
+        "Promotion Cost", "Cost / Qualifying Hour", "Cost / Subscriber", "Cost / Follow-on View",
         "CTR %", "Avg View Duration", "Watch Time / View",
         "Efficiency Score", "Status",
     ]
@@ -1322,7 +1538,7 @@ def render(db_path: Path, channel: str) -> None:
         hide_index=True,
         column_config={
             "Promotion Cost": st.column_config.NumberColumn(format="$%.2f"),
-            "Cost / Organic Hour": st.column_config.NumberColumn(format="$%.2f"),
+            "Cost / Qualifying Hour": st.column_config.NumberColumn(format="$%.2f"),
             "Cost / Subscriber": st.column_config.NumberColumn(format="$%.2f"),
             "Cost / Follow-on View": st.column_config.NumberColumn(format="$%.3f"),
             "Promotion %": st.column_config.NumberColumn(format="%.1f%%"),
@@ -1338,9 +1554,10 @@ def render(db_path: Path, channel: str) -> None:
     # --- Promotion Impact Panel ---
     _render_promotion_impact(metrics)
 
-    # --- Future API connections notice ---
-    with st.expander("Connect Real Promotion Data", expanded=False):
-        st.markdown("""
+    # --- Future API connections notice (production only) ---
+    if not fixed_data_source:
+        with st.expander("Connect Real Promotion Data", expanded=False):
+            st.markdown("""
 **Upload Promotion CSV** — drop a CSV from Google Ads / YouTube Studio.
 Use the **Upload Promotion CSV** option in the sidebar.
 Expected columns: `video_id, campaign, cost_usd, views` (paid views).
@@ -1350,4 +1567,4 @@ Wire up `services/youtube_analytics.YouTubeAnalyticsAPIAdapter` with OAuth crede
 
 **Google Ads API** — campaign spend, paid views, CPV by video.
 Wire up `services/google_ads.GoogleAdsAPIAdapter` with a manager account client.
-        """)
+            """)

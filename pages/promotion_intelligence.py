@@ -27,7 +27,11 @@ from channel_state import render_channel_selector
 from db import DB_PATH
 from models.promotion import VideoPromotionMetrics, make_metrics
 from promotion_intelligence.promotion_prediction import PromotionPredictor
-from promotion_intelligence.promotion_roi import BUDGET_TIERS, ROICalculator
+from promotion_intelligence.promotion_roi import (
+    BUDGET_TIERS,
+    ROICalculator,
+    format_projected_cost,
+)
 from promotion_intelligence.recommendation_engine import RecommendationEngine
 from promotion_intelligence.recommendation_models import (
     PROMOTION_CLASS_COLOR,
@@ -282,12 +286,13 @@ def _build_real_features(db: Path, cpv: float, channel: str) -> list[VideoFeatur
             if m.data_source == "API_ACTUAL" and float(row.get("adv_watch_hours", 0)) > 0:
                 adv_wh = float(row["adv_watch_hours"])
                 org_wh = max(m.total_watch_hours - adv_wh, 0.0)
+                qualifying_wh = 0.0 if 0 < m.length_seconds <= 180 else org_wh
                 promo_pct = (m.promotion_views / max(m.total_views, 1)) * 100
                 corrected.append(_dc.replace(
                     m,
                     promotion_watch_hours=adv_wh,
                     organic_watch_hours=org_wh,
-                    estimated_qualifying_hours=org_wh,
+                    estimated_qualifying_hours=qualifying_wh,
                     promotion_percentage=promo_pct,
                 ))
             else:
@@ -447,7 +452,10 @@ def _roi_card(est: ROIEstimate) -> None:
     c5.metric("Follow-on Views", f"{est.estimated_follow_on_views:,}")
     c6.metric("Expected PES", f"{est.expected_promotion_efficiency:.0f}/100")
     c7, c8, c9 = st.columns(3)
-    c7.metric("$/Qualifying Hr", f"${est.cost_per_qualified_hour_projected:.2f}")
+    c7.metric(
+        "$/Qualifying Hr",
+        format_projected_cost(est.cost_per_qualified_hour_projected),
+    )
     c8.metric("$/Subscriber", f"${est.cost_per_subscriber_projected:.2f}")
     c9.metric("$/Follow-on View", f"${est.cost_per_follow_on_projected:.3f}")
     st.caption(f"ℹ️ {est.confidence_reason}")
@@ -720,7 +728,10 @@ with tab_roi:
                 st.metric("Follow-on", f"{est.estimated_follow_on_views:,}")
                 st.metric("Qual. Hrs", f"{est.estimated_qualifying_hours:.1f} h")
                 st.metric("Exp. PES", f"{est.expected_promotion_efficiency:.0f}/100")
-                st.metric("$/Qual Hr", f"${est.cost_per_qualified_hour_projected:.2f}")
+                st.metric(
+                    "$/Qual Hr",
+                    format_projected_cost(est.cost_per_qualified_hour_projected),
+                )
                 st.metric("$/Sub", f"${est.cost_per_subscriber_projected:.2f}")
 
         st.divider()

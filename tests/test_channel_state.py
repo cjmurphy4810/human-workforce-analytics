@@ -1,11 +1,12 @@
 from channel_state import CHANNELS, DEFAULT_CHANNEL
 
 
-def test_channels_registry_has_three_entries():
+def test_channels_registry_has_four_entries():
     assert CHANNELS == {
         "human_workforce": "The Human Workforce",
         "club_genius": "Club Genius Stories",
         "kzak": "KZAK Music Videos",
+        "techy_chef_tips": "Techy Chef Tips",
     }
 
 
