@@ -276,7 +276,7 @@ def build_demo_database(path: Path, *, seed: int = 8142026) -> None:
                 f"A fictional {DEMO_CHANNEL_NAME} lesson created only for the public demo.",
                 f"{item['published'].isoformat()}T15:00:00Z",
                 item["duration"],
-                f"demo://thumbnail/{item['video_id']}",
+                None,
             )
         )
         playlist_video_rows.append(
@@ -293,7 +293,7 @@ def build_demo_database(path: Path, *, seed: int = 8142026) -> None:
                 "A fictional collection generated for the public analytics demo.",
                 "2026-02-01T15:00:00Z",
                 item_count,
-                f"demo://playlist/{playlist_id}",
+                None,
             )
         )
 

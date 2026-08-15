@@ -9,7 +9,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from demo.config import DEMO_AS_OF, DEMO_CHANNEL_KEY
-from demo.report_data import query_frame
+from demo.report_data import require_frame
 from demo.ui import render_demo_notice, render_demo_sidebar, render_empty_state
 
 
@@ -21,7 +21,7 @@ _PARAMS = {"channel": DEMO_CHANNEL_KEY, "as_of": DEMO_AS_OF.isoformat()}
 
 
 def _load_daily() -> pd.DataFrame:
-    return query_frame(
+    return require_frame(
         "SELECT metric_date, views, estimated_minutes_watched, subscribers_gained, "
         "subscribers_lost FROM daily_channel_metrics WHERE channel=:channel "
         "AND metric_date<=:as_of ORDER BY metric_date",
@@ -30,7 +30,7 @@ def _load_daily() -> pd.DataFrame:
 
 
 def _load_video_daily() -> pd.DataFrame:
-    return query_frame(
+    return require_frame(
         "SELECT d.metric_date, d.video_id, v.title, d.views, "
         "d.estimated_minutes_watched/60.0 AS watch_hours, d.average_view_duration "
         "FROM daily_video_metrics d LEFT JOIN videos v ON v.channel=d.channel "
@@ -41,7 +41,7 @@ def _load_video_daily() -> pd.DataFrame:
 
 
 def _load_daily_adjustments() -> pd.DataFrame:
-    return query_frame(
+    return require_frame(
         "WITH advertising AS (SELECT metric_date, SUM(estimated_minutes_watched) minutes "
         "FROM video_traffic_source_metrics WHERE channel=:channel AND metric_date<=:as_of "
         "AND traffic_source_type='ADVERTISING' GROUP BY metric_date), "
@@ -175,13 +175,13 @@ tab_views, tab_watch, tab_qual = st.tabs(
     ["Views", "Total Watch Hours", "Qualifying Watch Hours"]
 )
 with tab_views:
-    st.plotly_chart(_build_chart("views", "Views"), use_container_width=True)
+    st.plotly_chart(_build_chart("views", "Views"), width="stretch")
 with tab_watch:
-    st.plotly_chart(_build_chart("watch_hours", "Watch Hours"), use_container_width=True)
+    st.plotly_chart(_build_chart("watch_hours", "Watch Hours"), width="stretch")
 with tab_qual:
     st.plotly_chart(
         _build_chart("qualifying_hours", "Qualifying Watch Hours"),
-        use_container_width=True,
+        width="stretch",
     )
 
 mtd = daily[daily["year_month"] == current_month]
@@ -255,7 +255,7 @@ if duration_view == "By Video":
         )
         chart.update_yaxes(autorange="reversed")
         chart.update_layout(height=max(380, len(aggregate) * 28))
-        st.plotly_chart(chart, use_container_width=True)
+        st.plotly_chart(chart, width="stretch")
 else:
     if period_daily.empty:
         render_empty_state("daily watch-time")
@@ -282,7 +282,7 @@ else:
             hovermode="x unified",
             height=420,
         )
-        st.plotly_chart(daily_chart, use_container_width=True)
+        st.plotly_chart(daily_chart, width="stretch")
 
 st.caption(
     "All totals above aggregate daily increments; average durations are weighted by views."

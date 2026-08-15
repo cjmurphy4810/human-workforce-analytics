@@ -8,12 +8,12 @@ weighted by views; count and watch-time fields are summed over the same window.
 
 from __future__ import annotations
 
-import sqlite3
 from datetime import date
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from demo.config import DEMO_CHANNEL_KEY
+from demo.report_data import require_rows
 
 
 def eligible_organic_watch_hours(
@@ -94,27 +94,29 @@ def aggregate_video_window(
     if start > end:
         raise ValueError("start must be on or before end")
 
-    with sqlite3.connect(path) as conn:
-        metric_rows = conn.execute(
-            "SELECT video_id, COALESCE(SUM(views), 0), "
-            "COALESCE(SUM(estimated_minutes_watched), 0), "
-            "COALESCE(SUM(average_view_duration * views) / NULLIF(SUM(views), 0), 0), "
-            "COALESCE(SUM(likes), 0), COALESCE(SUM(subscribers_gained), 0), "
-            "COUNT(DISTINCT metric_date) "
-            "FROM daily_video_metrics WHERE channel=? AND metric_date BETWEEN ? AND ? "
-            "GROUP BY video_id ORDER BY video_id",
-            (channel, start.isoformat(), end.isoformat()),
-        ).fetchall()
-        traffic_rows = conn.execute(
-            "SELECT video_id, traffic_source_type, COALESCE(SUM(views), 0), "
-            "COALESCE(SUM(estimated_minutes_watched), 0), "
-            "COALESCE(SUM(average_view_duration * views) / NULLIF(SUM(views), 0), 0) "
-            "FROM video_traffic_source_metrics "
-            "WHERE channel=? AND metric_date BETWEEN ? AND ? "
-            "GROUP BY video_id, traffic_source_type "
-            "ORDER BY video_id, traffic_source_type",
-            (channel, start.isoformat(), end.isoformat()),
-        ).fetchall()
+    window = (channel, start.isoformat(), end.isoformat())
+    metric_rows = require_rows(
+        "SELECT video_id, COALESCE(SUM(views), 0), "
+        "COALESCE(SUM(estimated_minutes_watched), 0), "
+        "COALESCE(SUM(average_view_duration * views) / NULLIF(SUM(views), 0), 0), "
+        "COALESCE(SUM(likes), 0), COALESCE(SUM(subscribers_gained), 0), "
+        "COUNT(DISTINCT metric_date) "
+        "FROM daily_video_metrics WHERE channel=? AND metric_date BETWEEN ? AND ? "
+        "GROUP BY video_id ORDER BY video_id",
+        window,
+        path=path,
+    )
+    traffic_rows = require_rows(
+        "SELECT video_id, traffic_source_type, COALESCE(SUM(views), 0), "
+        "COALESCE(SUM(estimated_minutes_watched), 0), "
+        "COALESCE(SUM(average_view_duration * views) / NULLIF(SUM(views), 0), 0) "
+        "FROM video_traffic_source_metrics "
+        "WHERE channel=? AND metric_date BETWEEN ? AND ? "
+        "GROUP BY video_id, traffic_source_type "
+        "ORDER BY video_id, traffic_source_type",
+        window,
+        path=path,
+    )
 
     traffic_by_video: dict[str, dict[str, dict[str, float | int]]] = {}
     for video_id, source, views, minutes, average_duration in traffic_rows:

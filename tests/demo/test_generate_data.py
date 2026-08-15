@@ -42,6 +42,23 @@ def test_fixture_integrity_validator_passes(tmp_path):
     assert validate_demo_database(path) == []
 
 
+def test_generated_thumbnails_are_empty_or_packaged_local_paths(tmp_path):
+    path = tmp_path / "demo.db"
+    build_demo_database(path)
+    with sqlite3.connect(path) as conn:
+        values = [
+            value
+            for table in ("videos", "playlists")
+            for (value,) in conn.execute(f"SELECT thumbnail_url FROM {table}")
+        ]
+
+    assert all(
+        value in (None, "") or str(value).startswith("demo/assets/")
+        for value in values
+    )
+    assert all("demo://" not in str(value) for value in values)
+
+
 def test_retention_has_all_report_windows_with_reconciled_views(tmp_path):
     path = tmp_path / "demo.db"
     build_demo_database(path)

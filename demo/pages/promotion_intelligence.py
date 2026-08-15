@@ -12,7 +12,7 @@ import streamlit as st
 from analytics.promotion_efficiency import compute_efficiency_scores
 from demo.analytics import aggregate_video_window, filter_promotion_opportunities
 from demo.config import DEMO_AS_OF, DEMO_CHANNEL_KEY, DEMO_DB_PATH
-from demo.report_data import query_frame
+from demo.report_data import require_frame
 from demo.ui import render_demo_notice, render_demo_sidebar, render_empty_state
 from models.promotion import VideoPromotionMetrics, make_metrics
 from promotion_intelligence.promotion_prediction import PromotionPredictor
@@ -124,12 +124,12 @@ def _load_features(cpv: float) -> list[VideoFeatures]:
             DEMO_DB_PATH, start=start, end=DEMO_AS_OF, channel=DEMO_CHANNEL_KEY
         )
     }
-    videos = query_frame(
+    videos = require_frame(
         "SELECT video_id, title, published_at, duration_seconds FROM videos "
         "WHERE channel=:channel AND date(published_at)<=:as_of ORDER BY published_at",
         {"channel": DEMO_CHANNEL_KEY, "as_of": DEMO_AS_OF.isoformat()},
     )
-    ci_scores = query_frame(
+    ci_scores = require_frame(
         "SELECT video_id, overall_score FROM ci_video_scores WHERE channel=:channel "
         "AND scored_at=(SELECT MAX(scored_at) FROM ci_video_scores "
         "WHERE channel=:channel AND scored_at<=:as_of)",

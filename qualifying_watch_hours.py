@@ -29,6 +29,11 @@ from services.google_ads import GoogleAdsCSVAdapter
 
 _YPP_WATCH_HOURS_THRESHOLD = 3_000
 _BONUS_THRESHOLD = 4_000  # 12-month growth target
+NO_PROMOTION_DATA_MESSAGE = (
+    "No promotion data loaded — all non-Shorts watch hours are counting as "
+    "qualifying. Upload a Promotion CSV in the sidebar to subtract "
+    "promotion-generated hours."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1479,8 +1484,7 @@ def render(
             (
                 "The simulated dataset contains no promotion watch time for this selection."
                 if fixed_data_source
-                else "No promotion data loaded — all watch hours are counting as qualifying. "
-                "Upload a Promotion CSV in the sidebar to subtract promotion-generated hours."
+                else NO_PROMOTION_DATA_MESSAGE
             ),
             icon="ℹ️",
         )

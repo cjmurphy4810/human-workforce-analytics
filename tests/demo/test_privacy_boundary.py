@@ -4,7 +4,12 @@ import sqlite3
 
 import pytest
 
-from tests.demo.privacy_rules import scan_demo_artifacts
+from demo.build_artifact import build_public_demo_artifact
+from tests.demo.privacy_rules import (
+    TEXT_COLUMNS,
+    load_production_privacy_reference,
+    scan_demo_artifacts,
+)
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -89,6 +94,9 @@ def _create_scannable_database(path: Path) -> None:
                 channel TEXT, video_id TEXT, title TEXT, description TEXT,
                 published_at TEXT, thumbnail_url TEXT
             );
+            CREATE TABLE channel_snapshots (
+                captured_at TEXT, channel TEXT, channel_id TEXT
+            );
             CREATE TABLE playlists (
                 channel TEXT, playlist_id TEXT, title TEXT, description TEXT,
                 published_at TEXT, thumbnail_url TEXT
@@ -109,15 +117,19 @@ def _create_scannable_database(path: Path) -> None:
         )
 
 
-def test_demo_artifacts_pass_privacy_scan():
-    production_ids = _load_production_youtube_ids(PRODUCTION_DB_PATH)
+def test_deployable_artifact_passes_runtime_production_privacy_scan(tmp_path):
+    artifact = build_public_demo_artifact(tmp_path / "artifact")
+    db_path = artifact / "demo" / "data" / "demo.db"
+    reference = load_production_privacy_reference(PRODUCTION_DB_PATH)
 
-    assert production_ids
+    assert reference.identifiers
+    assert reference.content
     assert (
         scan_demo_artifacts(
-            DEMO_ROOT,
-            DEMO_DB_PATH,
-            known_youtube_ids=production_ids,
+            artifact,
+            db_path,
+            known_youtube_ids=reference.identifiers,
+            known_production_texts=reference.content,
         )
         == []
     )
@@ -127,17 +139,88 @@ def test_demo_privacy_scan_is_independent_of_current_working_directory(
     tmp_path,
     monkeypatch,
 ):
+    artifact_root = tmp_path / "artifact"
+    build_public_demo_artifact(artifact_root)
+    artifact_db = artifact_root / "demo" / "data" / "demo.db"
+    reference = load_production_privacy_reference(PRODUCTION_DB_PATH)
     monkeypatch.chdir(tmp_path)
-    production_ids = _load_production_youtube_ids(PRODUCTION_DB_PATH)
 
     assert (
         scan_demo_artifacts(
-            DEMO_ROOT,
-            DEMO_DB_PATH,
-            known_youtube_ids=production_ids,
+            artifact_root,
+            artifact_db,
+            known_youtube_ids=reference.identifiers,
+            known_production_texts=reference.content,
         )
         == []
     )
+
+
+def test_privacy_column_manifest_covers_every_demo_text_and_identifier_column():
+    with sqlite3.connect(f"file:{DEMO_DB_PATH.resolve()}?mode=ro", uri=True) as conn:
+        actual = {}
+        for table in TEXT_COLUMNS:
+            actual[table] = {
+                row[1]
+                for row in conn.execute(f'PRAGMA table_info("{table}")')
+                if "TEXT" in str(row[2]).upper()
+                or row[1] == "channel"
+                or row[1].endswith("_id")
+            }
+
+    assert {table: set(columns) for table, columns in TEXT_COLUMNS.items()} == actual
+
+
+def test_scanner_detects_normalized_exact_production_content_without_echoing_it(
+    tmp_path,
+):
+    root = tmp_path / "demo"
+    root.mkdir()
+    db_path = tmp_path / "demo.db"
+    _create_scannable_database(db_path)
+    production_title = "Confidential   Production Episode"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO videos(video_id, title) VALUES (?, ?)",
+            ("fictional", "  CONFIDENTIAL production episode  "),
+        )
+        conn.execute(
+            "INSERT INTO channel_snapshots(channel, channel_id) VALUES (?, ?)",
+            ("demo", "production-channel-id"),
+        )
+
+    errors = scan_demo_artifacts(
+        root,
+        db_path,
+        known_youtube_ids={"production-channel-id"},
+        known_production_texts={production_title},
+    )
+
+    assert any("forbidden exact production content" in error for error in errors)
+    assert any("forbidden production YouTube ID" in error for error in errors)
+    assert all("confidential" not in error.lower() for error in errors)
+    assert all("production-channel-id" not in error for error in errors)
+
+
+def test_scanner_detects_short_exact_production_database_content(tmp_path):
+    root = tmp_path / "demo"
+    root.mkdir()
+    db_path = tmp_path / "demo.db"
+    _create_scannable_database(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO videos(video_id, title) VALUES (?, ?)",
+            ("fictional", "Private"),
+        )
+
+    errors = scan_demo_artifacts(
+        root,
+        db_path,
+        known_production_texts={" private "},
+    )
+
+    assert any("forbidden exact production content" in error for error in errors)
+    assert all("private" not in error.lower() for error in errors)
 
 
 def test_secondary_identifier_table_values_are_detected_and_redacted(tmp_path):

@@ -120,12 +120,13 @@ def test_promotion_inputs_include_advertised_and_organic_only_videos():
     assert promotion_flags == {0, 1}
 
 
-def test_query_frame_returns_an_empty_frame_for_invalid_sql():
+def test_query_frame_returns_typed_unavailable_for_invalid_sql():
     result = query_frame(
         "SELECT missing_column FROM daily_channel_metrics WHERE channel = :channel",
         {"channel": DEMO_CHANNEL_KEY},
     )
-    assert result.empty
+    assert not result.is_available
+    assert result.failure is not None
 
 
 def test_qualifying_metrics_sum_daily_increments_through_as_of(tmp_path):

@@ -9,14 +9,14 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from analytics.organic_momentum import MomentumScorer, calculate_growth_rate
+from analytics.organic_momentum_scoring import MomentumScorer, calculate_growth_rate
 from demo.analytics import (
     aggregate_video_window,
     eligible_organic_watch_hours,
     organic_window_totals,
 )
 from demo.config import DEMO_AS_OF, DEMO_CHANNEL_KEY, DEMO_DB_PATH
-from demo.report_data import query_frame
+from demo.report_data import require_frame
 from demo.ui import render_demo_notice, render_demo_sidebar, render_empty_state
 from models.organic_momentum import (
     MOMENTUM_CLASS_COLOR,
@@ -79,7 +79,7 @@ def _load_metrics(weights_json: str) -> list[OrganicMomentumMetrics]:
     library = _window_map(library_start, DEMO_AS_OF)
     recent = _window_map(recent_start, DEMO_AS_OF)
     baseline = _window_map(baseline_start, baseline_end)
-    videos = query_frame(
+    videos = require_frame(
         "SELECT video_id, title, published_at, duration_seconds FROM videos "
         "WHERE channel=:channel AND date(published_at)<=:as_of ORDER BY published_at",
         {"channel": DEMO_CHANNEL_KEY, "as_of": DEMO_AS_OF.isoformat()},

@@ -14,7 +14,7 @@ import streamlit as st
 import projections
 import retention
 from demo.config import DEMO_AS_OF, DEMO_CHANNEL_KEY, DEMO_CHANNEL_NAME
-from demo.report_data import query_frame
+from demo.report_data import require_frame
 from demo.ui import render_demo_notice, render_demo_sidebar, render_empty_state
 
 
@@ -32,7 +32,7 @@ _COUNTRIES = {
 
 
 def _query(sql: str) -> pd.DataFrame:
-    return query_frame(
+    return require_frame(
         sql,
         {"channel": DEMO_CHANNEL_KEY, "as_of": _PARAMS["as_of"]},
     )
@@ -129,9 +129,9 @@ trend_days = _range_picker("demo_overview_trend")
 trends = _filter_days(channel_snapshots, "captured_at", trend_days)
 trend_a, trend_b = st.columns(2)
 with trend_a:
-    st.plotly_chart(px.line(trends, x="captured_at", y="subscriber_count", markers=True, title="Subscribers Over Time"), use_container_width=True)
+    st.plotly_chart(px.line(trends, x="captured_at", y="subscriber_count", markers=True, title="Subscribers Over Time"), width="stretch")
 with trend_b:
-    st.plotly_chart(px.line(trends, x="captured_at", y="view_count", markers=True, title="Total Views Over Time"), use_container_width=True)
+    st.plotly_chart(px.line(trends, x="captured_at", y="view_count", markers=True, title="Total Views Over Time"), width="stretch")
 
 if not daily_channel.empty:
     st.subheader("Daily Performance")
@@ -140,9 +140,9 @@ if not daily_channel.empty:
     performance["net_subscribers"] = performance["subscribers_gained"] - performance["subscribers_lost"]
     perf_a, perf_b = st.columns(2)
     with perf_a:
-        st.plotly_chart(px.bar(performance, x="metric_date", y="views", title="Views per Day"), use_container_width=True)
+        st.plotly_chart(px.bar(performance, x="metric_date", y="views", title="Views per Day"), width="stretch")
     with perf_b:
-        st.plotly_chart(px.bar(performance, x="metric_date", y="net_subscribers", title="Net Subscribers per Day", color="net_subscribers", color_continuous_scale="RdYlGn"), use_container_width=True)
+        st.plotly_chart(px.bar(performance, x="metric_date", y="net_subscribers", title="Net Subscribers per Day", color="net_subscribers", color_continuous_scale="RdYlGn"), width="stretch")
 
     st.subheader("Growth Velocity")
     velocity_days = _range_picker("demo_overview_velocity")
@@ -161,7 +161,7 @@ if not daily_channel.empty:
         velocity_chart.add_bar(x=velocity["metric_date"], y=velocity[value], marker_color=color, row=row, col=1, showlegend=False)
         velocity_chart.add_scatter(x=velocity["metric_date"], y=velocity[average], line=dict(color="#F58518", width=3), row=row, col=1, showlegend=False)
     velocity_chart.update_layout(height=700, hovermode="x unified")
-    st.plotly_chart(velocity_chart, use_container_width=True)
+    st.plotly_chart(velocity_chart, width="stretch")
 
 st.subheader("Geographic Trends")
 if daily_geo.empty:
@@ -179,7 +179,7 @@ else:
         geo_chart.add_bar(x=geo[metric], y=geo["country"], orientation="h", marker_color=color, row=1, col=column, showlegend=False)
     geo_chart.update_yaxes(autorange="reversed")
     geo_chart.update_layout(height=max(320, len(geo) * 38))
-    st.plotly_chart(geo_chart, use_container_width=True)
+    st.plotly_chart(geo_chart, width="stretch")
 
 st.subheader("Top Videos")
 if video_snapshots.empty or videos.empty:
@@ -187,7 +187,7 @@ if video_snapshots.empty or videos.empty:
 else:
     latest_video_snapshots = video_snapshots.sort_values("captured_at").groupby("video_id", as_index=False).last()
     top_videos = latest_video_snapshots.merge(videos, on="video_id").sort_values("view_count", ascending=False)
-    st.dataframe(top_videos[["title", "view_count", "like_count", "comment_count", "published_at"]].head(20), use_container_width=True, hide_index=True)
+    st.dataframe(top_videos[["title", "view_count", "like_count", "comment_count", "published_at"]].head(20), width="stretch", hide_index=True)
 
 st.subheader("Playlists")
 st.caption("Performance sums each video's daily increments across the selected period.")
@@ -205,12 +205,12 @@ else:
     with playlist_a:
         chart = px.bar(playlist_rollup, x="views", y="title", orientation="h", title="Views per Playlist")
         chart.update_yaxes(autorange="reversed")
-        st.plotly_chart(chart, use_container_width=True)
+        st.plotly_chart(chart, width="stretch")
     with playlist_b:
         chart = px.bar(playlist_rollup, x="watch_hours", y="title", orientation="h", title="Watch Hours per Playlist")
         chart.update_yaxes(autorange="reversed")
-        st.plotly_chart(chart, use_container_width=True)
-    st.dataframe(playlist_rollup[["title", "item_count", "views", "watch_hours", "likes"]], use_container_width=True, hide_index=True)
+        st.plotly_chart(chart, width="stretch")
+    st.dataframe(playlist_rollup[["title", "item_count", "views", "watch_hours", "likes"]], width="stretch", hide_index=True)
 
 if not daily_channel.empty:
     st.subheader("Watch Time")
@@ -263,7 +263,7 @@ if not daily_channel.empty:
     watch_chart.add_bar(x=watch["metric_date"], y=watch["qualifying_hours"], name="Qualifying hours", marker_color="#54A24B")
     watch_chart.add_bar(x=watch["metric_date"], y=watch["promotion_hours"], name="Promotion hours", marker_color="#E45756")
     watch_chart.update_layout(barmode="stack", title="Daily Watch Hours: Qualifying vs Promotion", hovermode="x unified")
-    st.plotly_chart(watch_chart, use_container_width=True)
+    st.plotly_chart(watch_chart, width="stretch")
     selected_total = watch["watch_hours"].sum()
     selected_qualifying = watch["qualifying_hours"].sum()
     selected_ratio = selected_qualifying / max(selected_total, 1.0)
@@ -285,7 +285,7 @@ with discovery_tab:
         traffic = traffic.sort_values("views", ascending=False)
         traffic_chart = px.bar(traffic, x="views", y="traffic_source_type", orientation="h", color="watch_hours", color_continuous_scale="Blues", title="Discovery Sources")
         traffic_chart.update_yaxes(autorange="reversed")
-        st.plotly_chart(traffic_chart, use_container_width=True)
+        st.plotly_chart(traffic_chart, width="stretch")
 
 engagement = pd.DataFrame()
 if not daily_videos.empty and not videos.empty:
@@ -312,12 +312,12 @@ with engagement_tab:
         ranked["short_title"] = ranked["title"].map(lambda value: str(value)[:45] + ("…" if len(str(value)) > 45 else ""))
         engagement_chart = px.bar(ranked, x=ranking, y="short_title", orientation="h", color="watch_rate", color_continuous_scale="RdYlGn", title="Video Engagement Ranking")
         engagement_chart.update_yaxes(autorange="reversed")
-        st.plotly_chart(engagement_chart, use_container_width=True)
+        st.plotly_chart(engagement_chart, width="stretch")
 with table_tab:
     if engagement.empty:
         render_empty_state("engagement detail")
     else:
-        st.dataframe(engagement[["title", "views", "watch_hours", "watch_rate", "like_rate", "subscriber_rate"]].sort_values("views", ascending=False), use_container_width=True, hide_index=True)
+        st.dataframe(engagement[["title", "views", "watch_hours", "watch_rate", "like_rate", "subscriber_rate"]].sort_values("views", ascending=False), width="stretch", hide_index=True)
 
 
 def _render_retention(frame: pd.DataFrame, range_label: str, video_id: str | None = None) -> None:
@@ -360,12 +360,12 @@ else:
         if history.empty:
             render_empty_state("video snapshot")
         else:
-            st.plotly_chart(px.line(history, x="captured_at", y=["view_count", "like_count", "comment_count"], markers=True, title="Engagement Growth"), use_container_width=True)
+            st.plotly_chart(px.line(history, x="captured_at", y=["view_count", "like_count", "comment_count"], markers=True, title="Engagement Growth"), width="stretch")
     with deep_b:
         if per_day.empty:
             render_empty_state("video daily metrics")
         else:
-            st.plotly_chart(px.bar(per_day, x="metric_date", y="views", title="Daily View Increments"), use_container_width=True)
+            st.plotly_chart(px.bar(per_day, x="metric_date", y="views", title="Daily View Increments"), width="stretch")
     if not retention_buckets.empty:
         _render_retention(retention_buckets, st.session_state.get("demo_video_range", "Last quarter"), selected_video)
 
@@ -424,6 +424,6 @@ else:
     cohort["watch_hours"] = cohort["minutes"] / 60.0
     cohort["timing"] = cohort["timing_hours"].map(lambda hours: f"{hours:+.0f}h")
     cohort = cohort.sort_values("timing_hours")
-    st.dataframe(cohort[["title", "timing", "theme", "relevance_score", "views", "watch_hours", "subscribers"]], use_container_width=True, hide_index=True)
+    st.dataframe(cohort[["title", "timing", "theme", "relevance_score", "views", "watch_hours", "subscribers"]], width="stretch", hide_index=True)
 
 st.caption(f"All report cutoffs are fixed at {DEMO_AS_OF:%B %d, %Y}; all displayed channel data is synthetic.")

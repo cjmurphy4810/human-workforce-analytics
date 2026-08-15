@@ -106,3 +106,11 @@ def test_public_caption_names_both_qualifying_exclusions(monkeypatch, tmp_path):
         "Estimates YouTube Partner Program qualifying watch hours by excluding "
         "advertising-generated watch time and watch time from Shorts."
     )
+
+
+def test_no_promotion_copy_keeps_shorts_excluded():
+    assert report_page.NO_PROMOTION_DATA_MESSAGE == (
+        "No promotion data loaded — all non-Shorts watch hours are counting as "
+        "qualifying. Upload a Promotion CSV in the sidebar to subtract "
+        "promotion-generated hours."
+    )

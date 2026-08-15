@@ -249,6 +249,21 @@ class MomentumScorer:
         return metrics
 
 
+# Keep the database builder backward compatible while making the executable scoring
+# boundary an audited pure module that the isolated public artifact can share.
+from analytics.organic_momentum_scoring import (  # noqa: E402,F811
+    MomentumScorer,  # noqa: F401
+    _PopStats,
+    _percentile_rank,
+    calculate_growth_rate,
+    calculate_organic_momentum_score,
+    calculate_post_promotion_lift,  # noqa: F401
+    classify_momentum,
+    normalize_metric,  # noqa: F401
+    recommend_action,
+)
+
+
 # ── DB data builder ───────────────────────────────────────────────────────────
 
 

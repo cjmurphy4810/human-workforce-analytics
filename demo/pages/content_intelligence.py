@@ -13,7 +13,7 @@ from content_intelligence.models import (
     AnalyticsSnapshot,
     Episode,
 )
-from content_intelligence.service import ContentIntelligenceService, load_assets
+from content_intelligence.scoring.scorer import ContentScorer
 from demo.analytics import (
     aggregate_video_window,
     content_repackaging_rows,
@@ -21,11 +21,11 @@ from demo.analytics import (
     rank_persisted_content_rows,
 )
 from demo.config import DEMO_AS_OF, DEMO_CHANNEL_KEY, DEMO_DB_PATH
-from demo.report_data import query_frame
+from demo.report_data import require_frame
 from demo.ui import render_demo_notice, render_demo_sidebar, render_empty_state
 
 
-_SVC = ContentIntelligenceService(DEMO_DB_PATH, channel=DEMO_CHANNEL_KEY)
+_SCORER = ContentScorer()
 _CLASSIFICATION_LABELS = {
     "subscriber_magnet": "🧲 Subscriber Magnet",
     "hidden_gem": "💎 Hidden Gem",
@@ -50,12 +50,12 @@ def _load_scored_library() -> list[dict[str, object]]:
             channel=DEMO_CHANNEL_KEY,
         )
     }
-    videos = query_frame(
+    videos = require_frame(
         "SELECT video_id, title, description, published_at, duration_seconds, thumbnail_url "
         "FROM videos WHERE channel=:channel AND date(published_at)<=:as_of",
         {"channel": DEMO_CHANNEL_KEY, "as_of": DEMO_AS_OF.isoformat()},
     )
-    persisted_scores = query_frame(
+    persisted_scores = require_frame(
         "SELECT video_id, tier, overall_score, engagement_score, evergreen_score, "
         "subscriber_magnet_score, hidden_gem_score, watch_rate_pct "
         "FROM ci_video_scores "
@@ -105,7 +105,7 @@ def _load_scored_library() -> list[dict[str, object]]:
         snapshots.append(snapshot)
         snapshot_map[video_id] = snapshot
 
-    scored_signals = _SVC._scorer.rank_episodes(episodes, snapshots)
+    scored_signals = _SCORER.rank_episodes(episodes, snapshots)
     classification_map = {
         episode.id: list(episode.classifications) for episode in scored_signals
     }
@@ -150,7 +150,12 @@ def _load_scored_library() -> list[dict[str, object]]:
 
 @st.cache_data(ttl=300)
 def _load_asset_library() -> list[dict]:
-    return load_assets(DEMO_DB_PATH, channel=DEMO_CHANNEL_KEY)
+    assets = require_frame(
+        "SELECT * FROM ci_content_assets WHERE channel=:channel "
+        "ORDER BY generated_at DESC",
+        {"channel": DEMO_CHANNEL_KEY},
+    )
+    return assets.to_dict("records")
 
 
 def _episode_table(rows: list[dict[str, object]]) -> None:

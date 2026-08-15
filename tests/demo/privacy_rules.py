@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from contextlib import closing
+from dataclasses import dataclass
+import json
 from pathlib import Path
 import re
 import sqlite3
+import unicodedata
 
 
 FORBIDDEN_SOURCE_TOKENS = (
@@ -34,6 +37,55 @@ FORBIDDEN_BRAND_TOKENS = (
 )
 
 TEXT_COLUMNS = {
+    "channel_snapshots": (
+        "captured_at",
+        "channel",
+        "channel_id",
+    ),
+    "channel_traffic_sources": (
+        "metric_date",
+        "channel",
+        "traffic_source_type",
+    ),
+    "ci_content_assets": (
+        "asset_id",
+        "channel",
+        "video_id",
+        "video_title",
+        "asset_type",
+        "title",
+        "body",
+        "generated_at",
+        "status",
+        "approved_at",
+        "scheduled_for",
+        "notes",
+    ),
+    "ci_video_scores": (
+        "scored_at",
+        "channel",
+        "video_id",
+        "tier",
+    ),
+    "daily_channel_metrics": (
+        "metric_date",
+        "channel",
+    ),
+    "daily_geo_metrics": (
+        "metric_date",
+        "channel",
+        "country_code",
+    ),
+    "daily_video_metrics": (
+        "metric_date",
+        "channel",
+        "video_id",
+    ),
+    "playlist_videos": (
+        "channel",
+        "playlist_id",
+        "video_id",
+    ),
     "videos": (
         "channel",
         "video_id",
@@ -63,21 +115,39 @@ TEXT_COLUMNS = {
         "theme",
         "why_now",
     ),
-    "ci_content_assets": (
-        "asset_id",
+    "retention_buckets": (
         "channel",
         "video_id",
-        "video_title",
-        "asset_type",
-        "title",
-        "body",
-        "generated_at",
-        "status",
-        "approved_at",
-        "scheduled_for",
-        "notes",
+        "window_start",
+        "window_end",
+        "window_kind",
+        "fetched_at",
+    ),
+    "video_snapshots": (
+        "captured_at",
+        "channel",
+        "video_id",
+    ),
+    "video_traffic_source_metrics": (
+        "metric_date",
+        "channel",
+        "video_id",
+        "traffic_source_type",
     ),
 }
+
+PRODUCTION_CONTENT_COLUMNS = {
+    "videos": ("title", "description"),
+    "playlists": ("title", "description"),
+    "queue_recommendations": ("theme", "why_now"),
+    "ci_content_assets": ("video_title", "title", "body", "notes"),
+}
+
+
+@dataclass(frozen=True)
+class ProductionPrivacyReference:
+    identifiers: frozenset[str]
+    content: frozenset[str]
 
 _REMOTE_SCHEME_PATTERN = re.compile(
     r"(?:https?|ftps?|s3|gs|wss?)://[^\s\"'<>)}\]]+",
@@ -96,6 +166,7 @@ _ALLOWED_SOURCE_URLS = {
     "http://www.w3.org/2000/svg",
 }
 _ASCII_TEXT_PATTERN = re.compile(rb"[\x09\x0a\x0d\x20-\x7e]+")
+_MIN_DISTINCTIVE_CONTENT_LENGTH = 12
 
 
 def _production_id_pattern(known_youtube_ids: Iterable[str]) -> re.Pattern[str] | None:
@@ -107,6 +178,122 @@ def _production_id_pattern(known_youtube_ids: Iterable[str]) -> re.Pattern[str] 
         return None
     alternatives = "|".join(re.escape(identifier) for identifier in identifiers)
     return re.compile(alternatives)
+
+
+def _normalize_content(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", str(value)).casefold()
+    return " ".join(normalized.split())
+
+
+def _production_content_values(values: Iterable[str]) -> frozenset[str]:
+    """Return distinctive values safe for embedded artifact-text matching."""
+    return frozenset(
+        {
+            normalized
+            for value in values
+            if (normalized := _normalize_content(value))
+            and len(normalized) >= _MIN_DISTINCTIVE_CONTENT_LENGTH
+        }
+    )
+
+
+def _visit_queue_values(
+    value,
+    *,
+    key: str = "",
+    identifiers: set[str],
+    content: set[str],
+) -> None:
+    if isinstance(value, dict):
+        for child_key, child in value.items():
+            _visit_queue_values(
+                child,
+                key=str(child_key),
+                identifiers=identifiers,
+                content=content,
+            )
+    elif isinstance(value, list):
+        for child in value:
+            _visit_queue_values(
+                child,
+                key=key,
+                identifiers=identifiers,
+                content=content,
+            )
+    elif isinstance(value, str) and value:
+        if key.endswith("_id"):
+            identifiers.add(value)
+        if key in {"news_headlines", "theme", "title", "why_now"}:
+            content.add(value)
+
+
+def load_production_privacy_reference(path: Path) -> ProductionPrivacyReference:
+    """Load identifiers and exact content directly from the production fixture."""
+    path = Path(path)
+    identifiers: set[str] = set()
+    content: set[str] = set()
+    with closing(
+        sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True)
+    ) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+        }
+        for table in tables:
+            columns = [
+                row[1]
+                for row in connection.execute(
+                    f'PRAGMA table_info("{table}")'
+                ).fetchall()
+            ]
+            identifier_columns = [
+                column
+                for column in columns
+                if column == "channel" or column.endswith("_id")
+            ]
+            for column in identifier_columns:
+                values = connection.execute(
+                    f'SELECT DISTINCT "{column}" FROM "{table}" '
+                    f'WHERE "{column}" IS NOT NULL'
+                ).fetchall()
+                identifiers.update(str(value) for (value,) in values if value)
+
+        for table, columns in PRODUCTION_CONTENT_COLUMNS.items():
+            if table not in tables:
+                raise AssertionError(f"production privacy schema mismatch: {table}")
+            actual_columns = {
+                row[1]
+                for row in connection.execute(
+                    f'PRAGMA table_info("{table}")'
+                ).fetchall()
+            }
+            if not set(columns).issubset(actual_columns):
+                raise AssertionError(f"production privacy schema mismatch: {table}")
+            for column in columns:
+                values = connection.execute(
+                    f'SELECT DISTINCT "{column}" FROM "{table}" '
+                    f'WHERE "{column}" IS NOT NULL'
+                ).fetchall()
+                content.update(str(value) for (value,) in values if value)
+
+        if "publishing_queue" not in tables:
+            raise AssertionError("production privacy schema mismatch: publishing_queue")
+        for (raw,) in connection.execute(
+            "SELECT result_json FROM publishing_queue WHERE result_json IS NOT NULL"
+        ).fetchall():
+            _visit_queue_values(
+                json.loads(raw),
+                identifiers=identifiers,
+                content=content,
+            )
+
+    return ProductionPrivacyReference(
+        identifiers=frozenset(identifiers),
+        content=frozenset(content),
+    )
 
 
 def _has_remote_reference(text: str, *, allow_standard_urls: bool) -> bool:
@@ -136,9 +323,11 @@ def _scan_text(
     location: str,
     text: str,
     production_id_pattern: re.Pattern[str] | None,
+    production_content: frozenset[str],
     *,
     allow_standard_urls: bool,
     database_text: bool = False,
+    embedded_content: bool = True,
 ) -> list[str]:
     errors: list[str] = []
     lowered = text.lower()
@@ -155,6 +344,17 @@ def _scan_text(
 
     if production_id_pattern is not None and production_id_pattern.search(text):
         errors.append(f"{location}: forbidden production YouTube ID")
+    normalized = _normalize_content(text)
+    has_production_content = False
+    if normalized and production_content:
+        if embedded_content:
+            has_production_content = any(
+                value in normalized for value in production_content
+            )
+        else:
+            has_production_content = normalized in production_content
+    if has_production_content:
+        errors.append(f"{location}: forbidden exact production content")
     return errors
 
 
@@ -162,6 +362,7 @@ def _scan_source_tree(
     root: Path,
     db_path: Path,
     production_id_pattern: re.Pattern[str] | None,
+    production_content: frozenset[str],
 ) -> list[str]:
     if not root.exists():
         return [f"{root}: source root is missing"]
@@ -181,6 +382,7 @@ def _scan_source_tree(
             relative_location,
             normalized_location,
             production_id_pattern,
+            production_content,
             allow_standard_urls=True,
         )
         errors.extend(
@@ -208,6 +410,7 @@ def _scan_source_tree(
                 relative_location,
                 text,
                 production_id_pattern,
+                production_content,
                 allow_standard_urls=True,
             )
         )
@@ -217,6 +420,7 @@ def _scan_source_tree(
 def _scan_database(
     db_path: Path,
     production_id_pattern: re.Pattern[str] | None,
+    production_content: frozenset[str],
 ) -> list[str]:
     if not db_path.exists():
         return [f"{db_path}: database is missing"]
@@ -247,11 +451,8 @@ def _scan_database(
                 if missing_columns:
                     errors.append(f"{table}: database scan failed (missing columns)")
                     continue
-                expression = " || ' ' || ".join(
-                    f"CAST(COALESCE(\"{column}\", '') AS TEXT)"
-                    for column in columns
-                )
-                rows = conn.execute(f'SELECT {expression} FROM "{table}"').fetchall()
+                selected = ", ".join(f'"{column}"' for column in columns)
+                rows = conn.execute(f'SELECT {selected} FROM "{table}"').fetchall()
             except sqlite3.Error as exc:
                 errors.append(
                     f"{table}: database scan failed ({exc.__class__.__name__})"
@@ -259,16 +460,21 @@ def _scan_database(
                 continue
 
             for index, row in enumerate(rows):
-                value = row[0] or ""
-                errors.extend(
-                    _scan_text(
-                        f"{table}[{index}]",
-                        value,
-                        production_id_pattern,
-                        allow_standard_urls=True,
-                        database_text=True,
+                for column, raw_value in zip(columns, row):
+                    value = str(raw_value or "")
+                    errors.extend(
+                        _scan_text(
+                            f"{table}[{index}]",
+                            value,
+                            production_id_pattern,
+                            production_content,
+                            allow_standard_urls=True,
+                            database_text=True,
+                            embedded_content=(
+                                table == "publishing_queue" and column == "result_json"
+                            ),
+                        )
                     )
-                )
     return errors
 
 
@@ -277,14 +483,29 @@ def scan_demo_artifacts(
     db_path: Path,
     *,
     known_youtube_ids: Iterable[str] = (),
+    known_production_texts: Iterable[str] = (),
 ) -> list[str]:
     """Return privacy-boundary violations without raising on bad artifacts."""
     root = Path(root)
     db_path = Path(db_path)
     production_id_pattern = _production_id_pattern(known_youtube_ids)
-    errors = _scan_source_tree(root, db_path, production_id_pattern) + _scan_database(
+    all_production_content = frozenset(
+        normalized
+        for value in known_production_texts
+        if (normalized := _normalize_content(value))
+    )
+    distinctive_production_content = _production_content_values(
+        all_production_content
+    )
+    errors = _scan_source_tree(
+        root,
         db_path,
         production_id_pattern,
+        distinctive_production_content,
+    ) + _scan_database(
+        db_path,
+        production_id_pattern,
+        all_production_content,
     )
     return [
         _redact_production_ids(error, production_id_pattern)

@@ -10,7 +10,7 @@ import streamlit as st
 
 from demo.analytics import eligible_organic_watch_hours
 from demo.config import DEMO_AS_OF, DEMO_CHANNEL_KEY
-from demo.report_data import query_frame
+from demo.report_data import require_frame
 from demo.ui import render_demo_notice, render_demo_sidebar, render_empty_state
 
 
@@ -40,7 +40,7 @@ _PARAMS = {
 
 @st.cache_data(ttl=300)
 def _load_playlist_videos() -> pd.DataFrame:
-    return query_frame(
+    return require_frame(
         "SELECT p.title AS playlist, pv.video_id FROM playlists p "
         "JOIN playlist_videos pv ON pv.channel=p.channel AND pv.playlist_id=p.playlist_id "
         "WHERE p.channel=:channel",
@@ -51,7 +51,7 @@ def _load_playlist_videos() -> pd.DataFrame:
 @st.cache_data(ttl=300)
 def _load_video_window() -> pd.DataFrame:
     """Aggregate each video's daily increments over one explicit inclusive window."""
-    return query_frame(
+    return require_frame(
         "WITH metrics AS ("
         "SELECT video_id, SUM(views) AS views, "
         "SUM(estimated_minutes_watched)/60.0 AS watch_hours, "
