@@ -5,13 +5,19 @@ from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
+from channel_state import CHANNELS
 from db import SCHEMA
 from fetch_metrics import CHANNEL_CONFIGS
 
 
-def test_channel_configs_cover_all_three_channels():
+def test_channel_configs_cover_all_four_channels():
     keys = {c["key"] for c in CHANNEL_CONFIGS}
-    assert keys == {"human_workforce", "club_genius", "kzak"}
+    assert keys == set(CHANNELS) == {
+        "human_workforce",
+        "club_genius",
+        "kzak",
+        "techy_chef_tips",
+    }
     for cfg in CHANNEL_CONFIGS:
         assert cfg["channel_id_env"].startswith("YT_CHANNEL_ID_")
         assert cfg["refresh_token_env"].startswith("YT_REFRESH_TOKEN_")
