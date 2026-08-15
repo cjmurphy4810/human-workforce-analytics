@@ -223,6 +223,72 @@ def test_scanner_detects_short_exact_production_database_content(tmp_path):
     assert all("private" not in error.lower() for error in errors)
 
 
+def test_scanner_detects_utf8_production_content_in_text_artifact(tmp_path):
+    root = tmp_path / "demo"
+    root.mkdir()
+    production_copy = "Private résumé — launch briefing"
+    (root / "briefing.txt").write_text(production_copy, encoding="utf-8")
+    db_path = tmp_path / "demo.db"
+    _create_scannable_database(db_path)
+
+    errors = scan_demo_artifacts(
+        root,
+        db_path,
+        known_production_texts={production_copy},
+    )
+
+    assert any("forbidden exact production content" in error for error in errors)
+    assert all(production_copy not in error for error in errors)
+
+
+def test_scanner_nfkc_normalizes_utf8_artifact_content(tmp_path):
+    root = tmp_path / "demo"
+    root.mkdir()
+    production_copy = "Private Office IV Briefing"
+    compatibility_copy = "Ｐｒｉｖａｔｅ Office Ⅳ Briefing"
+    (root / "briefing.txt").write_text(compatibility_copy, encoding="utf-8")
+    db_path = tmp_path / "demo.db"
+    _create_scannable_database(db_path)
+
+    errors = scan_demo_artifacts(
+        root,
+        db_path,
+        known_production_texts={production_copy},
+    )
+
+    assert any("forbidden exact production content" in error for error in errors)
+    assert all(production_copy not in error for error in errors)
+    assert all(compatibility_copy not in error for error in errors)
+
+
+def test_scanner_decodes_escaped_unicode_in_publishing_queue_json(tmp_path):
+    root = tmp_path / "demo"
+    root.mkdir()
+    db_path = tmp_path / "demo.db"
+    _create_scannable_database(db_path)
+    production_copy = "Private résumé — launch briefing"
+    payload = json.dumps(
+        {"ranked_videos": [{"analysis": {"copy": production_copy}}]},
+        ensure_ascii=True,
+    )
+    assert "\\u" in payload
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO publishing_queue(analyzed_at, channel, result_json) "
+            "VALUES (?, ?, ?)",
+            ("now", "demo", payload),
+        )
+
+    errors = scan_demo_artifacts(
+        root,
+        db_path,
+        known_production_texts={production_copy},
+    )
+
+    assert any("forbidden exact production content" in error for error in errors)
+    assert all(production_copy not in error for error in errors)
+
+
 def test_secondary_identifier_table_values_are_detected_and_redacted(tmp_path):
     production_db = tmp_path / "production.db"
     _create_production_identifier_database(production_db)
@@ -519,10 +585,21 @@ def test_scanner_reports_missing_tables_and_columns_instead_of_raising(tmp_path)
 def test_scanner_handles_undecodable_source_bytes(tmp_path):
     root = tmp_path / "demo"
     root.mkdir()
-    (root / "leak.py").write_bytes(b"\xffyoutube_client")
+    production_copy = "Private ASCII production briefing"
+    (root / "leak.bin").write_bytes(
+        b"\x89PNG\r\n\x1a\n\xffyoutube_client\x00"
+        + production_copy.encode("ascii")
+        + b"\x80"
+    )
     db_path = tmp_path / "demo.db"
     _create_scannable_database(db_path)
 
-    errors = scan_demo_artifacts(root, db_path)
+    errors = scan_demo_artifacts(
+        root,
+        db_path,
+        known_production_texts={production_copy},
+    )
 
     assert any("youtube_client" in error for error in errors)
+    assert any("forbidden exact production content" in error for error in errors)
+    assert all(production_copy not in error for error in errors)

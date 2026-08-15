@@ -319,6 +319,24 @@ def _ascii_text(raw: bytes) -> str:
     )
 
 
+def _decode_artifact_text(raw: bytes) -> str:
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return _ascii_text(raw)
+
+
+def _iter_json_string_leaves(value):
+    if isinstance(value, dict):
+        for child in value.values():
+            yield from _iter_json_string_leaves(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _iter_json_string_leaves(child)
+    elif isinstance(value, str):
+        yield value
+
+
 def _scan_text(
     location: str,
     text: str,
@@ -356,6 +374,51 @@ def _scan_text(
     if has_production_content:
         errors.append(f"{location}: forbidden exact production content")
     return errors
+
+
+def _scan_publishing_queue_json(
+    location: str,
+    raw_json: str,
+    production_id_pattern: re.Pattern[str] | None,
+    production_content: frozenset[str],
+) -> list[str]:
+    errors = _scan_text(
+        location,
+        raw_json,
+        production_id_pattern,
+        frozenset(),
+        allow_standard_urls=True,
+        database_text=True,
+    )
+    try:
+        payload = json.loads(raw_json)
+    except (json.JSONDecodeError, TypeError):
+        errors.extend(
+            _scan_text(
+                location,
+                raw_json,
+                production_id_pattern,
+                production_content,
+                allow_standard_urls=True,
+                database_text=True,
+            )
+        )
+        errors.append(f"{location}: database scan failed (invalid JSON)")
+        return list(dict.fromkeys(errors))
+
+    for value in _iter_json_string_leaves(payload):
+        errors.extend(
+            _scan_text(
+                location,
+                value,
+                production_id_pattern,
+                production_content,
+                allow_standard_urls=True,
+                database_text=True,
+                embedded_content=False,
+            )
+        )
+    return list(dict.fromkeys(errors))
 
 
 def _scan_source_tree(
@@ -404,7 +467,7 @@ def _scan_source_tree(
                 f"{relative_location}: source read failed ({exc.__class__.__name__})"
             )
             continue
-        text = _ascii_text(raw)
+        text = _decode_artifact_text(raw)
         errors.extend(
             _scan_text(
                 relative_location,
@@ -462,6 +525,16 @@ def _scan_database(
             for index, row in enumerate(rows):
                 for column, raw_value in zip(columns, row):
                     value = str(raw_value or "")
+                    if table == "publishing_queue" and column == "result_json":
+                        errors.extend(
+                            _scan_publishing_queue_json(
+                                f"{table}[{index}]",
+                                value,
+                                production_id_pattern,
+                                production_content,
+                            )
+                        )
+                        continue
                     errors.extend(
                         _scan_text(
                             f"{table}[{index}]",
@@ -470,9 +543,7 @@ def _scan_database(
                             production_content,
                             allow_standard_urls=True,
                             database_text=True,
-                            embedded_content=(
-                                table == "publishing_queue" and column == "result_json"
-                            ),
+                            embedded_content=False,
                         )
                     )
     return errors
