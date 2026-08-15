@@ -241,6 +241,26 @@ def test_scanner_detects_utf8_production_content_in_text_artifact(tmp_path):
     assert all(production_copy not in error for error in errors)
 
 
+def test_scanner_preserves_unicode_content_after_invalid_artifact_bytes(tmp_path):
+    root = tmp_path / "demo"
+    root.mkdir()
+    production_copy = "Private résumé — launch briefing"
+    (root / "mixed.bin").write_bytes(
+        b"\xff" + production_copy.encode("utf-8") + b"\x80"
+    )
+    db_path = tmp_path / "demo.db"
+    _create_scannable_database(db_path)
+
+    errors = scan_demo_artifacts(
+        root,
+        db_path,
+        known_production_texts={production_copy},
+    )
+
+    assert any("forbidden exact production content" in error for error in errors)
+    assert all(production_copy not in error for error in errors)
+
+
 def test_scanner_nfkc_normalizes_utf8_artifact_content(tmp_path):
     root = tmp_path / "demo"
     root.mkdir()
@@ -257,6 +277,52 @@ def test_scanner_nfkc_normalizes_utf8_artifact_content(tmp_path):
     )
 
     assert any("forbidden exact production content" in error for error in errors)
+    assert all(production_copy not in error for error in errors)
+    assert all(compatibility_copy not in error for error in errors)
+
+
+def test_scanner_redacts_unicode_production_content_from_filename(tmp_path):
+    root = tmp_path / "demo"
+    root.mkdir()
+    production_copy = "Private résumé — launch briefing"
+    (root / f"{production_copy}.txt").write_text(
+        "youtube_client",
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "demo.db"
+    _create_scannable_database(db_path)
+
+    errors = scan_demo_artifacts(
+        root,
+        db_path,
+        known_production_texts={production_copy},
+    )
+
+    assert any("<redacted-production-content>" in error for error in errors)
+    assert all(production_copy not in error for error in errors)
+
+
+def test_scanner_redacts_nfkc_equivalent_production_content_from_path(tmp_path):
+    root = tmp_path / "demo"
+    root.mkdir()
+    production_copy = "Private Office IV Briefing"
+    compatibility_copy = "Ｐｒｉｖａｔｅ Office Ⅳ Briefing"
+    leaked_directory = root / compatibility_copy
+    leaked_directory.mkdir()
+    (leaked_directory / "leak.py").write_text(
+        "youtube_client",
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "demo.db"
+    _create_scannable_database(db_path)
+
+    errors = scan_demo_artifacts(
+        root,
+        db_path,
+        known_production_texts={production_copy},
+    )
+
+    assert any("<redacted-production-content>" in error for error in errors)
     assert all(production_copy not in error for error in errors)
     assert all(compatibility_copy not in error for error in errors)
 

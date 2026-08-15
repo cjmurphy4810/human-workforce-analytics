@@ -312,6 +312,16 @@ def _redact_production_ids(
     return production_id_pattern.sub("<redacted-production-id>", value)
 
 
+def _redact_production_content_location(
+    location: str,
+    production_content: frozenset[str],
+) -> str:
+    normalized_location = _normalize_content(location)
+    if any(value in normalized_location for value in production_content):
+        return "<redacted-production-content>"
+    return location
+
+
 def _ascii_text(raw: bytes) -> str:
     return "\n".join(
         match.group(0).decode("ascii")
@@ -323,7 +333,8 @@ def _decode_artifact_text(raw: bytes) -> str:
     try:
         return raw.decode("utf-8")
     except UnicodeDecodeError:
-        return _ascii_text(raw)
+        decoded = raw.decode("utf-8", errors="replace")
+        return f"{decoded}\n{_ascii_text(raw)}"
 
 
 def _iter_json_string_leaves(value):
@@ -427,20 +438,30 @@ def _scan_source_tree(
     production_id_pattern: re.Pattern[str] | None,
     production_content: frozenset[str],
 ) -> list[str]:
+    root_location = _redact_production_content_location(
+        str(root),
+        production_content,
+    )
     if not root.exists():
-        return [f"{root}: source root is missing"]
+        return [f"{root_location}: source root is missing"]
     if not root.is_dir():
-        return [f"{root}: source root is not a directory"]
+        return [f"{root_location}: source root is not a directory"]
 
     errors: list[str] = []
     try:
         paths = sorted(root.rglob("*"))
     except OSError as exc:
-        return [f"{root}: source scan failed ({exc.__class__.__name__})"]
+        return [
+            f"{root_location}: source scan failed ({exc.__class__.__name__})"
+        ]
 
     for path in paths:
-        relative_location = str(path.relative_to(root))
-        normalized_location = path.relative_to(root).as_posix()
+        relative_path = path.relative_to(root)
+        relative_location = _redact_production_content_location(
+            str(relative_path),
+            production_content,
+        )
+        normalized_location = relative_path.as_posix()
         path_errors = _scan_text(
             relative_location,
             normalized_location,
@@ -485,22 +506,30 @@ def _scan_database(
     production_id_pattern: re.Pattern[str] | None,
     production_content: frozenset[str],
 ) -> list[str]:
+    db_location = _redact_production_content_location(
+        str(db_path),
+        production_content,
+    )
     if not db_path.exists():
-        return [f"{db_path}: database is missing"]
+        return [f"{db_location}: database is missing"]
     if not db_path.is_file():
-        return [f"{db_path}: database path is not a file"]
+        return [f"{db_location}: database path is not a file"]
 
     errors: list[str] = []
     try:
         conn = sqlite3.connect(f"file:{db_path.resolve()}?mode=ro", uri=True)
     except (OSError, sqlite3.Error) as exc:
-        return [f"{db_path}: database scan failed ({exc.__class__.__name__})"]
+        return [
+            f"{db_location}: database scan failed ({exc.__class__.__name__})"
+        ]
 
     with closing(conn):
         try:
             conn.execute("PRAGMA schema_version").fetchone()
         except sqlite3.Error as exc:
-            return [f"{db_path}: database scan failed ({exc.__class__.__name__})"]
+            return [
+                f"{db_location}: database scan failed ({exc.__class__.__name__})"
+            ]
 
         for table, columns in TEXT_COLUMNS.items():
             try:
