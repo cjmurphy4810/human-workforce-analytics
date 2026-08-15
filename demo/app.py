@@ -1,32 +1,40 @@
+from pathlib import Path
+import sys
+
 import streamlit as st
 
-from demo.ui import configure_page
+
+PACKAGE_ROOT = str(Path(__file__).resolve().parents[1])
+if PACKAGE_ROOT not in sys.path:
+    sys.path.insert(0, PACKAGE_ROOT)
+
+from demo.ui import configure_page  # noqa: E402
 
 
 configure_page("AI Engineering Genius")
 
 pages = {
     "Channel Analytics": [
-        st.Page("demo/pages/overview.py", title="Overview", icon="📊", default=True),
-        st.Page("demo/pages/daily_analytics.py", title="Daily Analytics", icon="📅"),
+        st.Page("pages/overview.py", title="Overview", icon="📊", default=True),
+        st.Page("pages/daily_analytics.py", title="Daily Analytics", icon="📅"),
         st.Page(
-            "demo/pages/qualifying_watch_hours.py",
+            "pages/qualifying_watch_hours.py",
             title="Qualifying Watch Hours",
             icon="⏱️",
         ),
-        st.Page("demo/pages/organic_momentum.py", title="Organic Momentum", icon="🌱"),
+        st.Page("pages/organic_momentum.py", title="Organic Momentum", icon="🌱"),
         st.Page(
-            "demo/pages/promotion_intelligence.py",
+            "pages/promotion_intelligence.py",
             title="Promotion Intelligence",
             icon="📣",
         ),
         st.Page(
-            "demo/pages/content_intelligence.py",
+            "pages/content_intelligence.py",
             title="Content Intelligence",
             icon="🧠",
         ),
         st.Page(
-            "demo/pages/video_render_comparisons.py",
+            "pages/video_render_comparisons.py",
             title="Video Render Comparisons",
             icon="🎬",
         ),

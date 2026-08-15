@@ -1,7 +1,28 @@
 from pathlib import Path
+import subprocess
+import sys
+
+from streamlit.testing.v1 import AppTest
 
 
 DEMO_ROOT = Path("demo")
+
+
+def test_demo_app_starts_without_password():
+    app = AppTest.from_file("demo/app.py").run(timeout=30)
+    assert not app.exception
+    assert "AI Engineering Genius" in " ".join(x.value for x in app.title)
+    assert not app.text_input
+
+
+def test_demo_app_is_importable_from_streamlit_script_context():
+    result = subprocess.run(
+        [sys.executable, "demo/app.py"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_demo_entry_point_has_no_authentication_surface():
