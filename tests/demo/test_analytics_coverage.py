@@ -323,7 +323,23 @@ def _build_unbaselined_production_window(path):
         conn.commit()
 
 
-def test_production_ypp_excludes_unbaselined_lifetime_snapshot(tmp_path):
+def test_production_ypp_credits_full_history_with_no_pre_window_baseline(tmp_path):
+    """_get_advertising_watch_hours/_get_shorts_watch_hours use boundary-snapshot
+    subtraction (_cumulative_window_total): a video's whole tracked history counts
+    unless an actual snapshot exists before window_start to subtract out. Here
+    window_start (2025-08-16) predates every row in the fixture, so there is no
+    pre-window baseline to exclude and each video's full lifetime-to-date value counts.
+
+    This replaced an earlier "always exclude the first observed snapshot" rule that
+    assumed every first snapshot might hide unobserved pre-window history. In
+    production that assumption undercounted every video for any channel younger than
+    the 365-day window (the normal case for a new channel) by roughly half, because it
+    discarded each video's entire first-observed total rather than just the portion
+    that could plausibly predate the window. See
+    test_advertising_hours_excludes_history_before_the_window in
+    tests/test_qualifying_hours.py for the case where a real pre-window snapshot does
+    exist and must be subtracted.
+    """
     path = tmp_path / "unbaselined_ypp.db"
     _build_unbaselined_production_window(path)
 
@@ -335,8 +351,10 @@ def test_production_ypp_excludes_unbaselined_lifetime_snapshot(tmp_path):
     )
 
     assert has_data is True
-    assert advertising == pytest.approx(70 / 60)
-    assert shorts == pytest.approx(50 / 60)
+    # long: 360 (latest running-max, no pre-window row) + short: 30 = 390 min.
+    assert advertising == pytest.approx(390 / 60)
+    # short total 260 min minus its own ADVERTISING 30 min = 230 min.
+    assert shorts == pytest.approx(230 / 60)
 
 
 def test_production_weekly_series_excludes_unbaselined_lifetime_snapshot(tmp_path):

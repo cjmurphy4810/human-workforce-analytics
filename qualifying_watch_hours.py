@@ -200,12 +200,58 @@ def _cumulative_snapshot_deltas(
     result["metric_date"] = pd.to_datetime(result["metric_date"])
     result = result.sort_values(group_columns + ["metric_date"])
     for column in value_columns:
+        # A per-video lifetime-to-date total can only truly grow. In practice this
+        # pipeline's ADVERTISING/per-video snapshots regularly dip for a week or more
+        # (observed: one video fell from 26,487 to 5,779 min over 14 days, then snapped
+        # back to exactly 26,487) before self-correcting — a temporary reporting glitch,
+        # not a real reduction. Collapsing each video's series to its running maximum
+        # before differencing ignores those dips (rather than either dropping that
+        # day's real growth, or misreading the dip's raw value as a fresh lifetime
+        # baseline and double-counting it) while still capturing genuine growth as soon
+        # as a new high is observed, even if the latest snapshot is itself mid-dip.
+        result[column] = result.groupby(group_columns)[column].cummax()
         delta = result.groupby(group_columns)[column].diff()
         # A first snapshot with no pre-window baseline is a lifetime value, not an
-        # increment. Exclude it until a later snapshot supplies an observable delta.
-        delta = delta.fillna(0.0)
-        result[column] = delta.where(delta >= 0, result[column])
+        # increment — exclude it until a later snapshot supplies an observable delta.
+        result[column] = delta.clip(lower=0.0).fillna(0.0)
     return result[result["metric_date"] >= pd.Timestamp(start)]
+
+
+def _cumulative_window_total(
+    frame: pd.DataFrame,
+    *,
+    group_columns: list[str],
+    value_column: str,
+    window_start: date,
+    as_of: date,
+) -> float:
+    """Sum each group's growth in a lifetime-cumulative counter within a window.
+
+    Unlike _cumulative_snapshot_deltas (summing every day-over-day delta — needed for a
+    day-by-day trend chart), an aggregate window total only needs two points per group:
+    the latest running-max value at-or-before `as_of`, minus the latest running-max
+    value strictly before `window_start` (0 if no such row exists — i.e. this group's
+    entire tracked history already falls inside the window, which is the normal case
+    for any channel younger than the window). Summing daily deltas instead
+    systematically undercounts here: a video's first-ever snapshot is excluded as an
+    unknowable baseline even when the channel didn't exist before the window (so there
+    is no real pre-window history to exclude), and a same-value "recovery" day after a
+    multi-day reporting dip can otherwise get re-added as if it were fresh growth.
+    """
+    if frame.empty:
+        return 0.0
+    df = frame.copy()
+    df["metric_date"] = pd.to_datetime(df["metric_date"])
+    df = df.sort_values(group_columns + ["metric_date"])
+    df[value_column] = df.groupby(group_columns)[value_column].cummax()
+
+    as_of_ts = pd.Timestamp(as_of)
+    start_ts = pd.Timestamp(window_start)
+
+    end_vals = df[df["metric_date"] <= as_of_ts].groupby(group_columns)[value_column].last()
+    start_vals = df[df["metric_date"] < start_ts].groupby(group_columns)[value_column].last()
+    end_vals, start_vals = end_vals.align(start_vals, fill_value=0.0)
+    return float((end_vals - start_vals).clip(lower=0.0).sum())
 
 
 def _build_real_metrics(
@@ -505,8 +551,9 @@ def _get_shorts_watch_hours(
     ran paid promotion, so this returns only each Short's non-ADVERTISING remainder
     (total minus that video's own ADVERTISING hours, floored at 0).
 
-    Increment storage is summed directly; cumulative storage is converted to deltas.
-    Both totals use the same explicit inclusive reporting window.
+    Increment storage is summed directly; cumulative storage uses boundary-snapshot
+    subtraction via _cumulative_window_total (see its docstring for why). Both totals
+    use the same explicit inclusive reporting window.
     """
     effective_as_of = as_of or date.today()
     cutoff = (effective_as_of - timedelta(days=364)).isoformat()
@@ -524,24 +571,27 @@ def _get_shorts_watch_hours(
         "AND d.traffic_source_type='ADVERTISING' AND v.duration_seconds>0 "
         "AND v.duration_seconds<=180 ORDER BY d.video_id, d.metric_date",
         (channel, effective_as_of.isoformat()))
+    window_start = effective_as_of - timedelta(days=364)
     if not daily_metrics_are_increments:
-        totals = _cumulative_snapshot_deltas(
+        total_minutes = _cumulative_window_total(
             totals,
             group_columns=["video_id"],
-            value_columns=["estimated_minutes_watched"],
-            start=effective_as_of - timedelta(days=364),
+            value_column="estimated_minutes_watched",
+            window_start=window_start,
+            as_of=effective_as_of,
         )
-        adv = _cumulative_snapshot_deltas(
+        adv_minutes = _cumulative_window_total(
             adv,
             group_columns=["video_id"],
-            value_columns=["estimated_minutes_watched"],
-            start=effective_as_of - timedelta(days=364),
+            value_column="estimated_minutes_watched",
+            window_start=window_start,
+            as_of=effective_as_of,
         )
     else:
         totals = totals[totals["metric_date"] >= cutoff] if not totals.empty else totals
         adv = adv[adv["metric_date"] >= cutoff] if not adv.empty else adv
-    total_minutes = float(totals["estimated_minutes_watched"].sum()) if not totals.empty else 0.0
-    adv_minutes = float(adv["estimated_minutes_watched"].sum()) if not adv.empty else 0.0
+        total_minutes = float(totals["estimated_minutes_watched"].sum()) if not totals.empty else 0.0
+        adv_minutes = float(adv["estimated_minutes_watched"].sum()) if not adv.empty else 0.0
     return max(total_minutes - adv_minutes, 0.0) / 60.0
 
 
@@ -555,7 +605,8 @@ def _get_advertising_watch_hours(
     """Return (advertising_watch_hours, has_api_data).
 
     Sums ADVERTISING watch time over the trailing year. Increment storage is summed
-    directly; cumulative storage is converted to deltas.
+    directly; cumulative storage uses boundary-snapshot subtraction via
+    _cumulative_window_total (see its docstring for why — not a running delta sum).
     Returns (0.0, False) when video_traffic_source_metrics has no ADVERTISING rows.
     """
     effective_as_of = as_of or date.today()
@@ -569,14 +620,15 @@ def _get_advertising_watch_hours(
         return 0.0, False
     if daily_metrics_are_increments:
         df = df[df["metric_date"] >= cutoff]
-    else:
-        df = _cumulative_snapshot_deltas(
-            df,
-            group_columns=["video_id"],
-            value_columns=["estimated_minutes_watched"],
-            start=effective_as_of - timedelta(days=364),
-        )
-    return float(df["estimated_minutes_watched"].sum()) / 60.0, True
+        return float(df["estimated_minutes_watched"].sum()) / 60.0, True
+    total_minutes = _cumulative_window_total(
+        df,
+        group_columns=["video_id"],
+        value_column="estimated_minutes_watched",
+        window_start=effective_as_of - timedelta(days=364),
+        as_of=effective_as_of,
+    )
+    return total_minutes / 60.0, True
 
 
 def _get_db_date_range(
