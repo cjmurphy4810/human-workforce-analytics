@@ -204,6 +204,20 @@ def write_geo_metrics(channel: str, rows: list[dict]) -> None:
             )
 
 
+def validate_authorized_channel(requested_channel_id: str | None) -> dict:
+    """Confirm the refresh token belongs to the configured YouTube channel."""
+    authorized = fetch_channel_stats(None)
+    authorized_id = authorized["channel_id"]
+    authorized_title = authorized["channel_title"]
+    print(f"OAuth token channel: {authorized_title} ({authorized_id})")
+    if requested_channel_id and authorized_id != requested_channel_id:
+        raise ValueError(
+            f"OAuth token belongs to {authorized_title} ({authorized_id}), "
+            f"not configured channel {requested_channel_id}"
+        )
+    return authorized
+
+
 def run_for_channel(channel_key: str, channel_id_env: str, refresh_token_env: str) -> None:
     os.environ["YT_REFRESH_TOKEN"] = os.environ[refresh_token_env]
     requested = os.environ.get(channel_id_env) or None
@@ -211,6 +225,7 @@ def run_for_channel(channel_key: str, channel_id_env: str, refresh_token_env: st
 
     print(f"[{captured_at}] [{channel_key}] Resolving channel...")
     requested_channel_id = resolve_channel_id(requested)
+    validate_authorized_channel(requested_channel_id)
 
     print(f"[{channel_key}] Fetching channel stats...")
     channel = fetch_channel_stats(requested_channel_id)

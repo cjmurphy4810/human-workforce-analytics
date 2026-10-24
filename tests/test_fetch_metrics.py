@@ -5,9 +5,11 @@ from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from channel_state import CHANNELS
 from db import SCHEMA
-from fetch_metrics import CHANNEL_CONFIGS, main
+from fetch_metrics import CHANNEL_CONFIGS, main, validate_authorized_channel
 
 
 def test_channel_configs_cover_every_dashboard_channel():
@@ -45,6 +47,19 @@ def test_main_can_fetch_only_the_requested_channel(monkeypatch):
     assert calls == [
         ("ai_citizen", "YT_CHANNEL_ID_AIC", "YT_REFRESH_TOKEN_AIC")
     ]
+
+
+def test_validate_authorized_channel_rejects_mismatched_brand_account(monkeypatch):
+    monkeypatch.setattr(
+        "fetch_metrics.fetch_channel_stats",
+        lambda channel_id=None: {
+            "channel_id": "UC-authorized",
+            "channel_title": "Different Channel",
+        },
+    )
+
+    with pytest.raises(ValueError, match="OAuth token belongs to Different Channel"):
+        validate_authorized_channel("UC-requested")
 
 
 def test_video_insert_is_tagged_with_channel(tmp_path, monkeypatch):
