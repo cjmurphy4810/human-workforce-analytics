@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from channel_state import CHANNELS
 from db import SCHEMA
-from fetch_metrics import CHANNEL_CONFIGS
+from fetch_metrics import CHANNEL_CONFIGS, main
 
 
 def test_channel_configs_cover_every_dashboard_channel():
@@ -29,6 +29,22 @@ def test_channel_configs_cover_every_dashboard_channel():
         "channel_id_env": "YT_CHANNEL_ID_AIC",
         "refresh_token_env": "YT_REFRESH_TOKEN_AIC",
     }
+
+
+def test_main_can_fetch_only_the_requested_channel(monkeypatch):
+    calls = []
+    monkeypatch.setenv("CHANNEL_KEY", "ai_citizen")
+    monkeypatch.setattr("fetch_metrics.init_db", lambda: None)
+    monkeypatch.setattr(
+        "fetch_metrics.run_for_channel",
+        lambda *args: calls.append(args),
+    )
+
+    main()
+
+    assert calls == [
+        ("ai_citizen", "YT_CHANNEL_ID_AIC", "YT_REFRESH_TOKEN_AIC")
+    ]
 
 
 def test_video_insert_is_tagged_with_channel(tmp_path, monkeypatch):

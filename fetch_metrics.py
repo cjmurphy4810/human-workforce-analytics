@@ -419,7 +419,15 @@ def run_for_channel(channel_key: str, channel_id_env: str, refresh_token_env: st
 
 def main() -> None:
     init_db()
-    for cfg in CHANNEL_CONFIGS:
+    requested_channel = os.environ.get("CHANNEL_KEY", "").strip()
+    configs = [
+        cfg for cfg in CHANNEL_CONFIGS
+        if not requested_channel or cfg["key"] == requested_channel
+    ]
+    if requested_channel and not configs:
+        raise ValueError(f"Unknown CHANNEL_KEY: {requested_channel}")
+
+    for cfg in configs:
         try:
             run_for_channel(cfg["key"], cfg["channel_id_env"], cfg["refresh_token_env"])
         except Exception as e:
