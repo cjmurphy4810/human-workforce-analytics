@@ -3,7 +3,7 @@ name: Fetch YouTube Analytics
 on:
   schedule:
     # Once daily at 06:00 UTC. Was every 4 hours (6 runs/day); the per-video API call
-    # loops (traffic-source + retention-window fetches, across 4 channels) were pushing
+    # loops (traffic-source + retention-window fetches, across all channels) were pushing
     # the YouTube Data/Analytics API daily quota to exhaustion. Daily cuts total call
     # volume ~6x. Adjust the hour freely — it's arbitrary, not tied to any other gotcha.
     - cron: "0 6 * * *"
@@ -37,6 +37,9 @@ jobs:
           YT_REFRESH_TOKEN_KZAK: ${{ secrets.YT_REFRESH_TOKEN_KZAK }}
           YT_CHANNEL_ID_TCT: ${{ secrets.YT_CHANNEL_ID_TCT }}
           YT_REFRESH_TOKEN_TCT: ${{ secrets.YT_REFRESH_TOKEN_TCT }}
+          # Public channel ID for https://youtube.com/@TheAICitizenShorts
+          YT_CHANNEL_ID_AIC: UClodiPUGqOvEdr_tCkR5FeQ
+          YT_REFRESH_TOKEN_AIC: ${{ secrets.YT_REFRESH_TOKEN_AIC }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           NEWS_API_KEY: ${{ secrets.NEWS_API_KEY }}
         run: python fetch_metrics.py

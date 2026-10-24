@@ -64,6 +64,11 @@ CHANNEL_CONFIGS = [
         "channel_id_env": "YT_CHANNEL_ID_TCT",
         "refresh_token_env": "YT_REFRESH_TOKEN_TCT",
     },
+    {
+        "key": "ai_citizen",
+        "channel_id_env": "YT_CHANNEL_ID_AIC",
+        "refresh_token_env": "YT_REFRESH_TOKEN_AIC",
+    },
 ]
 
 

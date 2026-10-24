@@ -91,6 +91,39 @@ def test_bubble_chart_labels_qualifying_hours_as_qualifying(monkeypatch):
     assert "Organic" not in captured[0].layout.title.text
 
 
+def test_paid_organic_chart_maps_the_existing_series_to_the_correct_legend_colors(
+    monkeypatch,
+):
+    """The deployed chart's two live series were labeled in reverse.
+
+    The series currently stored in ``organic_hours`` is the paid/promoted curve, while
+    ``promotion_hours`` is the organically gained curve.  The chart must present the
+    paid curve in red and the organic curve in green so its legend matches the rest of
+    the dashboard.
+    """
+    captured = []
+    monkeypatch.setattr(
+        report_page.st,
+        "plotly_chart",
+        lambda figure, **kwargs: captured.append(figure),
+    )
+    frame = pd.DataFrame(
+        [{
+            "week": date(2026, 10, 19),
+            "organic_hours": 11.0,
+            "promotion_hours": 3.0,
+        }]
+    )
+
+    report_page._chart_stacked_area(frame, live_series_are_reversed=True)
+
+    traces = {trace.name: trace for trace in captured[0].data}
+    assert list(traces["Promotion Watch Hours"].y) == [11.0]
+    assert traces["Promotion Watch Hours"].line.color == "#E45756"
+    assert list(traces["Organic Watch Hours"].y) == [3.0]
+    assert traces["Organic Watch Hours"].line.color == "#54A24B"
+
+
 def test_public_caption_names_both_qualifying_exclusions(monkeypatch, tmp_path):
     captions = []
     monkeypatch.setattr(report_page.st, "caption", captions.append)

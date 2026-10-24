@@ -10,17 +10,25 @@ from db import SCHEMA
 from fetch_metrics import CHANNEL_CONFIGS
 
 
-def test_channel_configs_cover_all_four_channels():
+def test_channel_configs_cover_every_dashboard_channel():
     keys = {c["key"] for c in CHANNEL_CONFIGS}
     assert keys == set(CHANNELS) == {
         "human_workforce",
         "club_genius",
         "kzak",
         "techy_chef_tips",
+        "ai_citizen",
     }
     for cfg in CHANNEL_CONFIGS:
         assert cfg["channel_id_env"].startswith("YT_CHANNEL_ID_")
         assert cfg["refresh_token_env"].startswith("YT_REFRESH_TOKEN_")
+
+    ai_citizen = next(c for c in CHANNEL_CONFIGS if c["key"] == "ai_citizen")
+    assert ai_citizen == {
+        "key": "ai_citizen",
+        "channel_id_env": "YT_CHANNEL_ID_AIC",
+        "refresh_token_env": "YT_REFRESH_TOKEN_AIC",
+    }
 
 
 def test_video_insert_is_tagged_with_channel(tmp_path, monkeypatch):

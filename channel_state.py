@@ -11,6 +11,7 @@ CHANNELS: dict[str, str] = {
     "club_genius": "Club Genius Stories",
     "kzak": "KZAK Music Videos",
     "techy_chef_tips": "Techy Chef Tips",
+    "ai_citizen": "The AI Citizen",
 }
 
 DEFAULT_CHANNEL = "human_workforce"

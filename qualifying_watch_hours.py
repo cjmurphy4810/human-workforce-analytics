@@ -774,13 +774,25 @@ def _try_load_csv(uploaded) -> Optional[list[VideoPromotionMetrics]]:
 # Chart renderers
 # ---------------------------------------------------------------------------
 
-def _chart_stacked_area(ts: pd.DataFrame) -> None:
+def _chart_stacked_area(
+    ts: pd.DataFrame, *, live_series_are_reversed: bool = False
+) -> None:
     if ts.empty:
         st.info("No time-series data available.")
         return
+    # The production rollup's two legacy columns are reversed relative to the
+    # observed paid/organic curves. Correct that mapping at the live-chart boundary
+    # while leaving the synthetic demo series (whose columns are already semantic)
+    # untouched.
+    organic_hours = (
+        ts["promotion_hours"] if live_series_are_reversed else ts["organic_hours"]
+    )
+    promotion_hours = (
+        ts["organic_hours"] if live_series_are_reversed else ts["promotion_hours"]
+    )
     fig = go.Figure()
     fig.add_scatter(
-        x=ts["week"], y=ts["organic_hours"],
+        x=ts["week"], y=organic_hours,
         name="Organic Watch Hours",
         fill="tozeroy",
         mode="lines",
@@ -788,7 +800,7 @@ def _chart_stacked_area(ts: pd.DataFrame) -> None:
         fillcolor="rgba(84,162,75,0.35)",
     )
     fig.add_scatter(
-        x=ts["week"], y=ts["promotion_hours"],
+        x=ts["week"], y=promotion_hours,
         name="Promotion Watch Hours",
         fill="tozeroy",
         mode="lines",
@@ -1558,7 +1570,7 @@ def render(
         "Top 25 Videos", "Worst Promotions",
     ])
     with chart_tabs[0]:
-        _chart_stacked_area(ts)
+        _chart_stacked_area(ts, live_series_are_reversed=not is_demo)
     with chart_tabs[1]:
         _chart_qualifying_line(ts)
     with chart_tabs[2]:
