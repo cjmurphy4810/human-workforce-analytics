@@ -50,8 +50,10 @@ jobs:
           NEWS_API_KEY: ${{ secrets.NEWS_API_KEY }}
         run: python fetch_metrics.py
 
+      - name: Verify publishable database
+        run: python database_maintenance.py data.db --check-only --max-mib 95
+
       - name: Commit updated DB
-        if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"

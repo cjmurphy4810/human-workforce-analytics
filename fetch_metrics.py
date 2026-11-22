@@ -15,6 +15,7 @@ import anthropic
 
 from ai_client import classify_video_themes, fetch_news_headlines, rank_videos_by_news
 from content_intelligence.service import run_scoring as _ci_run_scoring
+from database_maintenance import DEFAULT_MAX_BYTES, check_database, maintain_database
 from db import DB_PATH as _DB_PATH
 from db import get_conn, init_db
 from youtube_client import (
@@ -447,6 +448,15 @@ def main() -> None:
             run_for_channel(cfg["key"], cfg["channel_id_env"], cfg["refresh_token_env"])
         except Exception as e:
             print(f"[{cfg['key']}] FAILED entirely ({e.__class__.__name__}: {e}), continuing to next channel.")
+
+    print("Maintaining analytics database...")
+    deleted = maintain_database(_DB_PATH)
+    print(f"Pruned rows: {deleted}")
+    health = check_database(_DB_PATH, max_bytes=DEFAULT_MAX_BYTES)
+    print(
+        f"Database health: {health['integrity']}; "
+        f"size={health['size_bytes']} bytes; limit={health['max_bytes']} bytes"
+    )
     print("Done.")
 
 

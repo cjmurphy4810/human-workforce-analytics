@@ -41,12 +41,54 @@ def test_main_can_fetch_only_the_requested_channel(monkeypatch):
         "fetch_metrics.run_for_channel",
         lambda *args: calls.append(args),
     )
+    monkeypatch.setattr("fetch_metrics.maintain_database", lambda *args: {})
+    monkeypatch.setattr(
+        "fetch_metrics.check_database",
+        lambda *args, **kwargs: {"integrity": "ok", "size_bytes": 1, "max_bytes": 2},
+    )
 
     main()
 
     assert calls == [
         ("ai_citizen", "YT_CHANNEL_ID_AIC", "YT_REFRESH_TOKEN_AIC")
     ]
+
+
+def test_main_maintains_and_checks_once_after_all_channels_even_after_failure(monkeypatch):
+    channel_calls = []
+    finalization_calls = []
+    monkeypatch.delenv("CHANNEL_KEY", raising=False)
+    monkeypatch.setattr("fetch_metrics.init_db", lambda: None)
+
+    def run_channel(*args):
+        channel_calls.append(args)
+        if args[0] == "club_genius":
+            raise RuntimeError("transient channel failure")
+
+    monkeypatch.setattr("fetch_metrics.run_for_channel", run_channel)
+    monkeypatch.setattr(
+        "fetch_metrics.maintain_database",
+        lambda path: finalization_calls.append(("maintain", path)) or {},
+    )
+    monkeypatch.setattr(
+        "fetch_metrics.check_database",
+        lambda path, max_bytes: finalization_calls.append(("check", path, max_bytes))
+        or {"integrity": "ok", "size_bytes": 1, "max_bytes": max_bytes},
+    )
+
+    main()
+
+    assert [call[0] for call in channel_calls] == [
+        "human_workforce",
+        "club_genius",
+        "kzak",
+        "techy_chef_tips",
+        "ai_citizen",
+    ]
+    assert len(finalization_calls) == 2
+    assert finalization_calls[0][0] == "maintain"
+    assert finalization_calls[1][0] == "check"
+    assert finalization_calls[0][1] == finalization_calls[1][1]
 
 
 def test_validate_authorized_channel_rejects_mismatched_brand_account(monkeypatch):
